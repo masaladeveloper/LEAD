@@ -37,7 +37,7 @@ def clean_reply(text):
 
         for word in stop_words:
 
-            if word.lower() in line.lower():
+            if line.lstrip().lower().startswith(word.lower()) or re.match(r"^On .+wrote:$", line.strip(), re.I) or line.lstrip().startswith(">"):
                 stop = True
                 break
 

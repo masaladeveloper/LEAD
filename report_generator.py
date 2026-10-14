@@ -76,6 +76,8 @@ def generate_weekly_report(leads: Iterable[dict[str, Any]], destination: str | P
     for lead in leads:
         for column, (_, field) in enumerate(REPORT_COLUMNS, 1):
             cell = sheet.cell(row_number, column, _report_value(lead, field))
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
             cell.alignment = top_alignment
             if field == "enquiry_date" and cell.value:
                 cell.number_format = "d/m/yyyy"

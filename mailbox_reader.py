@@ -18,7 +18,10 @@ def decode(value):
     for text, enc in parts:
 
         if isinstance(text, bytes):
-            result += text.decode(enc or "utf-8", errors="ignore")
+            try:
+                result += text.decode(enc or "utf-8", errors="replace")
+            except LookupError:
+                result += text.decode("utf-8", errors="replace")
 
         else:
             result += text
@@ -35,6 +38,9 @@ def get_body(msg):
 
         for part in msg.walk():
 
+            if part.get_content_disposition() == "attachment":
+                continue
+
             ctype = part.get_content_type()
 
             try:
@@ -46,7 +52,10 @@ def get_body(msg):
 
                 charset = part.get_content_charset() or "utf-8"
 
-                body = payload.decode(charset, errors="ignore")
+                try:
+                    body = payload.decode(charset, errors="replace")
+                except LookupError:
+                    body = payload.decode("utf-8", errors="replace")
 
                 if ctype == "text/html":
                     html = body
@@ -65,7 +74,10 @@ def get_body(msg):
 
             charset = msg.get_content_charset() or "utf-8"
 
-            body = payload.decode(charset, errors="ignore")
+            try:
+                body = payload.decode(charset, errors="replace")
+            except LookupError:
+                body = payload.decode("utf-8", errors="replace")
 
             if msg.get_content_type() == "text/html":
                 html = body
