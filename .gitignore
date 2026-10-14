@@ -4,3 +4,11 @@ __pycache__/
 logs/
 output/
 .vscode/
+
+.venv/
+*.db
+*.db-wal
+*.db-shm
+Muneer Lead CRM/
+build/
+dist/
