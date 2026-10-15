@@ -12,7 +12,7 @@ import re
 import time
 
 from bs4 import BeautifulSoup
-from crm_database import LeadDatabase, as_iso_date
+from crm_database import as_iso_date
 from html_parser import parse_html, extract_lead_id
 from mailbox_reader import decode, get_body
 from models import EmailMessage

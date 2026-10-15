@@ -1,29 +1,60 @@
-name: Windows desktop
+name: Build Windows EXE
+
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   test-and-package:
+    name: Test and build Windows executable
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          architecture: x64
           cache: pip
-      - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check dependency compatibility
+        run: python -m pip check
+      - name: Run all tests
+        run: python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
       - name: Build Windows executable
         shell: pwsh
         run: ./build_exe.ps1
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test packaged application
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:LEAD_CRM_DATA_DIR = Join-Path $env:RUNNER_TEMP 'lead-crm-smoke-test'
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $exe = (Resolve-Path 'dist/Muneer Lead CRM.exe').Path
+          $process = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru
+          try {
+            if (-not $process.WaitForExit(90000)) { throw 'The packaged application did not finish its startup check.' }
+            if ($process.ExitCode -ne 0) { throw "The packaged application exited with code $($process.ExitCode)." }
+            if (-not (Test-Path (Join-Path $env:LEAD_CRM_DATA_DIR 'lead_crm.db'))) { throw 'The packaged application did not initialize its database.' }
+          }
+          finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
         with:
           name: Muneer-Lead-CRM-Windows
           path: dist/Muneer Lead CRM.exe
           if-no-files-found: error
+          retention-days: 30

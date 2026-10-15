@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from config import DATABASE_PATH
 from crm_database import LeadDatabase
 from import_service import import_workbook
@@ -30,9 +29,7 @@ def main():
     database = LeadDatabase(args.database)
     try:
         if args.command == 'sync':
-            paths = args.mailbox or json.loads(database.get_setting('mailbox_paths', '[]'))
-            if not paths and database.get_setting('mailbox_path'):
-                paths = [database.get_setting('mailbox_path')]
+            paths = args.mailbox or database.mailbox_paths()
             if not paths:
                 parser.error('Configure Email settings or pass --mailbox.')
             result = sync_mailboxes(database, paths, args.sender or database.get_setting('sender_filter'), args.my_email or database.get_setting('my_email'), force=args.rescan)

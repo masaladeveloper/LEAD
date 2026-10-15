@@ -212,6 +212,36 @@ class Workflows(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'prevent duplicates'):
             import_workbook(self.database, path)
 
+    def test_invalid_phone_cannot_create_repeat_import_duplicates(self):
+        for phone, enquiry_date in [('not a phone', '2026-10-14'), ('9876543210', '   ')]:
+            with self.subTest(phone=phone, enquiry_date=enquiry_date):
+                path = self.workbook([['Call ID', 'Customer Name', 'ContactNo', 'Enq Date'],
+                                      [None, 'Ambiguous customer', phone, enquiry_date]])
+                with self.assertRaisesRegex(ValueError, 'Row 2.*prevent duplicates'):
+                    import_workbook(self.database, path)
+                self.assertEqual(self.database.counts()['total'], 0)
+
+    def test_attached_email_cannot_replace_enquiry_body(self):
+        message = enquiry()
+        message.add_attachment(enquiry('999', '<attached@example.test>', 'Attached customer'),
+                               filename='forwarded.eml')
+        result = self.sync([self.mbox('INBOX', [message])])
+        self.assertEqual(result.new_leads, 1)
+        self.assertEqual(self.database.find_by_call_id('101')['customer_name'], 'Test Customer')
+
+    def test_mailbox_settings_use_valid_paths_and_legacy_fallback(self):
+        self.database.set_setting('mailbox_path', '/legacy/INBOX')
+        for invalid in ('invalid json', '{}', '[1, null]', '"INBOX"'):
+            self.database.set_setting('mailbox_paths', invalid)
+            self.assertEqual(self.database.mailbox_paths(), ['/legacy/INBOX'])
+        self.database.set_setting('mailbox_paths', '["INBOX", "", "Sent"]')
+        self.assertEqual(self.database.mailbox_paths(), ['INBOX', 'Sent'])
+
+    def test_sync_interval_handles_invalid_saved_values(self):
+        for saved, expected in [('invalid', 1), ('0', 1), ('-1', 1), ('100', 60), ('5', 5)]:
+            self.database.set_setting('sync_minutes', saved)
+            self.assertEqual(self.database.sync_interval_minutes(), expected)
+
     def test_empty_export_is_valid_and_backup_restores_data(self):
         export_report(self.database, self.root / 'empty.xlsx')
         book = load_workbook(self.root / 'empty.xlsx')

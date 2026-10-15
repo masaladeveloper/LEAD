@@ -1,116 +1,40 @@
-"""
-Read Thunderbird mbox mailbox
-"""
-
-import mailbox
+"""Decode mail headers and body parts without reading attached messages."""
 from email.header import decode_header
 
-from models import EmailMessage
+
+def _decode_bytes(value, charset):
+    try:
+        return value.decode(charset or 'utf-8', errors='replace')
+    except LookupError:
+        return value.decode('utf-8', errors='replace')
 
 
 def decode(value):
     if not value:
-        return ""
-
-    parts = decode_header(value)
-    result = ""
-
-    for text, enc in parts:
-
-        if isinstance(text, bytes):
-            try:
-                result += text.decode(enc or "utf-8", errors="replace")
-            except LookupError:
-                result += text.decode("utf-8", errors="replace")
-
-        else:
-            result += text
-
-    return result
+        return ''
+    return ''.join(_decode_bytes(text, charset) if isinstance(text, bytes) else text
+                   for text, charset in decode_header(value))
 
 
-def get_body(msg):
-
-    html = ""
-    text = ""
-
-    if msg.is_multipart():
-
-        for part in msg.walk():
-
-            if part.get_content_disposition() == "attachment":
-                continue
-
-            ctype = part.get_content_type()
-
-            try:
-
-                payload = part.get_payload(decode=True)
-
-                if not payload:
-                    continue
-
-                charset = part.get_content_charset() or "utf-8"
-
-                try:
-                    body = payload.decode(charset, errors="replace")
-                except LookupError:
-                    body = payload.decode("utf-8", errors="replace")
-
-                if ctype == "text/html":
-                    html = body
-
-                elif ctype == "text/plain":
-                    text = body
-
-            except Exception:
-                pass
-
+def _body_parts(message):
+    # walk() visits the children of attachments too, including forwarded .eml
+    # files. Skip the entire attachment tree so it cannot replace the body.
+    if message.get_content_disposition() == 'attachment':
+        return
+    if message.is_multipart():
+        for part in message.get_payload():
+            yield from _body_parts(part)
     else:
+        yield message
 
-        payload = msg.get_payload(decode=True)
 
+def get_body(message):
+    bodies = {'text/html': '', 'text/plain': ''}
+    for part in _body_parts(message):
+        content_type = part.get_content_type()
+        if content_type not in bodies:
+            continue
+        payload = part.get_payload(decode=True)
         if payload:
-
-            charset = msg.get_content_charset() or "utf-8"
-
-            try:
-                body = payload.decode(charset, errors="replace")
-            except LookupError:
-                body = payload.decode("utf-8", errors="replace")
-
-            if msg.get_content_type() == "text/html":
-                html = body
-
-            else:
-                text = body
-
-    return html, text
-
-
-def read_mailbox(path):
-
-    box = mailbox.mbox(path)
-
-    for msg in box:
-
-        sender = decode(msg.get("From"))
-        subject = decode(msg.get("Subject"))
-        date = decode(msg.get("Date"))
-
-        message_id = decode(msg.get("Message-ID"))
-        in_reply_to = decode(msg.get("In-Reply-To"))
-        references = decode(msg.get("References"))
-
-        html, text = get_body(msg)
-
-        yield EmailMessage(
-            sender=sender,
-            subject=subject,
-            date=date,
-            message_id=message_id,
-            in_reply_to=in_reply_to,
-            references=references,
-            html=html,
-            text=text,
-        )
+            bodies[content_type] = _decode_bytes(payload, part.get_content_charset())
+    return bodies['text/html'], bodies['text/plain']

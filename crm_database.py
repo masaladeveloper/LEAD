@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from datetime import date, datetime
 from pathlib import Path
+import json
 import re
 import sqlite3
 import uuid
@@ -268,6 +269,26 @@ class LeadDatabase:
     def get_setting(self, key, default=''):
         row = self.connection.execute('SELECT value FROM settings WHERE key = ?', (key,)).fetchone()
         return row[0] if row else default
+
+    def mailbox_paths(self):
+        """Read validated folder settings, including the original single-folder setting."""
+        try:
+            paths = json.loads(self.get_setting('mailbox_paths', '[]'))
+        except ValueError:
+            paths = []
+        if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
+            paths = []
+        paths = [p.strip() for p in paths if p.strip()]
+        legacy = self.get_setting('mailbox_path').strip()
+        return paths or ([legacy] if legacy else [])
+
+    def sync_interval_minutes(self):
+        """Keep old or invalid saved settings within the desktop's supported range."""
+        try:
+            minutes = int(self.get_setting('sync_minutes', '1'))
+        except ValueError:
+            minutes = 1
+        return max(1, min(60, minutes))
 
     def set_setting(self, key, value):
         with self.transaction():

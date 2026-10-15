@@ -185,9 +185,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(label('Thunderbird downloads the mail. Muneer reads the local folders and keeps your leads up to date.', 'subtitle', True))
         form = QFormLayout()
         self.paths = []
-        saved = json.loads(self.database.get_setting('mailbox_paths', '[]'))
-        if not saved and self.database.get_setting('mailbox_path'):
-            saved = [self.database.get_setting('mailbox_path')]
+        saved = self.database.mailbox_paths()
         for index, title in enumerate(('Inbox file *', 'Sent file (recommended)')):
             field = QLineEdit(saved[index] if len(saved) > index else '')
             field.setPlaceholderText('Thunderbird mbox file — no .msf extension')
@@ -208,7 +206,7 @@ class SettingsDialog(QDialog):
         self.interval = QSpinBox()
         self.interval.setRange(1, 60)
         self.interval.setSuffix(' min')
-        self.interval.setValue(int(self.database.get_setting('sync_minutes', '1')))
+        self.interval.setValue(self.database.sync_interval_minutes())
         form.addRow('Check every', self.interval)
         layout.addLayout(form)
         layout.addWidget(label('In Thunderbird: Account Settings → Server Settings → Local directory. Select INBOX and Sent (not the .msf index files). Enable offline message downloads. Sent-folder sync captures your replies too.', 'notice', True))
@@ -540,7 +538,7 @@ class LeadCRMApp(QMainWindow):
     def configure_timer(self):
         self.timer.stop()
         if self.database.get_setting('auto_sync', '1') == '1':
-            self.timer.start(int(self.database.get_setting('sync_minutes', '1')) * 60000)
+            self.timer.start(self.database.sync_interval_minutes() * 60000)
 
     def open_settings(self):
         if SettingsDialog(self).exec():
@@ -574,9 +572,7 @@ class LeadCRMApp(QMainWindow):
     def sync(self, manual=False, force=False):
         if self.worker is not None:
             return
-        paths = json.loads(self.database.get_setting('mailbox_paths', '[]'))
-        if not paths and self.database.get_setting('mailbox_path'):
-            paths = [self.database.get_setting('mailbox_path')]
+        paths = self.database.mailbox_paths()
         sender = self.database.get_setting('sender_filter')
         my_email = self.database.get_setting('my_email')
         if not paths or not sender:
@@ -631,12 +627,17 @@ class LeadCRMApp(QMainWindow):
 
 
 def main():
+    smoke_test = '--smoke-test' in sys.argv
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setStyleSheet(STYLE)
     app.setApplicationName('Muneer Lead CRM')
-    window = LeadCRMApp()
+    window = LeadCRMApp(auto_start=not smoke_test)
     window.show()
+    if smoke_test:
+        # Exercise the real Qt entry point without reading mail or waiting for input.
+        window.timer.stop()
+        QTimer.singleShot(500, window.close)
     return app.exec()
 
 

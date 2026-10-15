@@ -114,6 +114,23 @@ GUI, `LEAD_CRM_DATA_DIR` overrides the data directory (useful for testing).
 
 ## Build a Windows executable
 
+### Download from GitHub Actions
+
+1. Merge these changes into `main` (or copy `.github/workflows/windows.yml` there).
+2. Open this repository on GitHub → **Actions → Build Windows EXE**.
+3. Click **Run workflow**, choose the branch to build, then **Run workflow** again.
+4. Open the completed green run. Under **Artifacts**, download
+   **Muneer-Lead-CRM-Windows** and unzip it.
+5. Run **Muneer Lead CRM.exe** on Windows. Python does not need to be installed.
+
+The workflow runs all tests, builds a 64-bit executable, and checks that the
+packaged Qt app starts and initializes a temporary database before uploading it.
+Artifacts are available for 30 days. The workflow also runs on pushes to `main`
+and pull requests. GitHub shows the manual run button after the workflow is on
+the default branch.
+
+### Build locally on Windows
+
 Build on Windows, using the environment above:
 
 ```powershell
@@ -121,9 +138,10 @@ Build on Windows, using the environment above:
 .\build_exe.ps1
 ```
 
-The output is `dist\Muneer Lead CRM.exe`. Previously checked-in `dist/` and `build/`
-files are historical builds; they do not contain the new interface. Rebuild from
-source. The Linux development environment cannot produce a verified Windows exe.
+The output is `dist\Muneer Lead CRM.exe`. The build script uses the single
+`Muneer Lead CRM.spec` configuration. Generated `dist/` and `build/` files stay
+out of source control; old checked-in builds and duplicate specs were removed.
+Windows executables must be built on Windows, including through Actions.
 
 ## Tests and structure
 
