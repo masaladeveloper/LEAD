@@ -22,7 +22,15 @@ import {
 import { api, downloadReport, initialize } from "./api";
 import { cardBlob, renderCard } from "./card";
 import { fields, responses, statuses } from "./types";
-import type { Detail, Job, Lead, Reminder, Settings } from "./types";
+import type {
+  Detail,
+  Job,
+  Lead,
+  Reminder,
+  Settings,
+  Collection,
+  CollectionRequest,
+} from "./types";
 import "./style.css";
 
 type View = "leads" | "followups" | "reports" | "settings";
@@ -47,6 +55,8 @@ const defaultColumns = [
 ];
 const tableFields: Record<string, string> = {
   ...fields,
+  responded: "Customer response",
+  relevance: "Relevance",
   updated_at: "Last updated",
 };
 function Select({
@@ -69,7 +79,18 @@ function Select({
       {!choices.includes(value) && <option>{value}</option>}
       {choices.map((v) => (
         <option key={v} value={v}>
-          {v || "Not set"}
+          {(
+            {
+              latest: "Date: newest first",
+              oldest: "Date: oldest first",
+              name_asc: "Name: A to Z",
+              name_desc: "Name: Z to A",
+              call_id_asc: "Call ID: A to Z",
+              call_id_desc: "Call ID: Z to A",
+            } as Record<string, string>
+          )[v] ||
+            v ||
+            "Not set"}
         </option>
       ))}
     </select>
@@ -152,13 +173,24 @@ export default function App() {
   const [ready, setReady] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [collectionId, setCollectionId] = useState<number | null>(() => {
+    const saved = Number(localStorage.getItem("lead-active-collection"));
+    return Number.isInteger(saved) && saved > 0 ? saved : null;
+  });
+  const [collectionDialog, setCollectionDialog] = useState(false);
+  const [rescanCollection, setRescanCollection] = useState(false);
+  const [startingCollection, setStartingCollection] = useState(false);
+  const [sort, setSort] = useState("latest");
+  const [pagination, setPagination] = useState({ total: 0, pages: 1 });
+  const selectedCollection =
+    collections.find((c) => c.id === collectionId) ?? null;
   const [dismissedCollection, setDismissedCollection] = useState("");
   const [view, setView] = useState<View>("leads"),
     [q, setQ] = useState(""),
     [status, setStatus] = useState("All leads"),
     [page, setPage] = useState(1);
   const [leads, setLeads] = useState<Lead[]>([]),
-    [hasMore, setHasMore] = useState(false),
     [counts, setCounts] = useState<Record<string, number>>({
       total: 0,
       open_count: 0,
@@ -210,13 +242,25 @@ export default function App() {
     [notificationTick, setNotificationTick] = useState(0);
   const sequence = useRef(0),
     notified = useRef(new Set<number>()),
-    lastFinished = useRef("");
+    lastFinished = useRef<string | null>(null);
   const touch = () => setRefresh((n) => n + 1);
   useEffect(() => {
     initialize()
       .then(() => setReady(true))
       .catch((e) => setError(e.message));
   }, []);
+  useEffect(() => {
+    localStorage.setItem("lead-active-collection", String(collectionId ?? ""));
+  }, [collectionId]);
+  useEffect(() => {
+    if (!ready) return;
+    api<Collection[]>("/collections")
+      .then((data) => {
+        setCollections(data);
+        setCollectionId((id) => (data.some((c) => c.id === id) ? id : null));
+      })
+      .catch((e) => setError(e.message));
+  }, [ready, refresh]);
   useEffect(() => {
     localStorage.setItem("lead-columns", JSON.stringify(columns));
   }, [columns]);
@@ -228,15 +272,18 @@ export default function App() {
         setLoading(true);
         api<{
           leads: Lead[];
-          has_more: boolean;
+          total: number;
+          pages: number;
+          page: number;
           counts: Record<string, number>;
         }>(
-          `/leads?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&page=${page}`,
+          `/leads?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&page=${page}&sort=${sort}${collectionId ? `&collection_id=${collectionId}` : ""}`,
         )
           .then((data) => {
             if (id !== sequence.current) return;
             setLeads(data.leads);
-            setHasMore(data.has_more);
+            setPagination({ total: data.total, pages: data.pages });
+            setPage(data.page);
             setCounts(data.counts);
           })
           .catch((e) => {
@@ -249,7 +296,7 @@ export default function App() {
       q ? 220 : 0,
     );
     return () => clearTimeout(timer);
-  }, [ready, q, status, page, refresh]);
+  }, [ready, q, status, page, refresh, sort, collectionId]);
   useEffect(() => {
     if (!ready) return;
     api<Reminder[]>("/reminders")
@@ -263,8 +310,19 @@ export default function App() {
         .then((data) => {
           setJob(data);
           if (data.finished_at && data.finished_at !== lastFinished.current) {
+            const initialPoll = lastFinished.current === null;
             lastFinished.current = data.finished_at;
+            if (data.collection && !initialPoll) {
+              setCollectionId(data.collection.id);
+              setPage(1);
+              setQ("");
+              setStatus("All leads");
+              setSort("latest");
+              setView("leads");
+            }
             touch();
+          } else if (lastFinished.current === null) {
+            lastFinished.current = data.finished_at;
           }
         })
         .catch((e) => setError(e.message));
@@ -300,20 +358,34 @@ export default function App() {
       setError((e as Error).message);
     }
   }
-  async function collect(rescan = false) {
+  async function collect(request: CollectionRequest) {
+    lastFinished.current = "";
+    setStartingCollection(true);
     setError("");
     try {
-      setJob(await api<Job>("/sync", "POST", { rescan }));
+      setJob(await api<Job>("/sync", "POST", request));
       setNotice("");
+      setCollectionDialog(false);
     } catch (e) {
       setError((e as Error).message);
+      throw e;
+    } finally {
+      setStartingCollection(false);
     }
+  }
+  function chooseCollection(id: number | null) {
+    setCollectionId(id);
+    setPage(1);
+    setQ("");
+    setStatus("All leads");
+    setSort("latest");
+    setView("leads");
   }
   async function report() {
     setReportBusy(true);
     setError("");
     try {
-      await downloadReport(through);
+      await downloadReport(through, collectionId);
       setNotice("Your Excel report is ready.");
     } catch (e) {
       setError((e as Error).message);
@@ -431,7 +503,10 @@ export default function App() {
               <button
                 className="primary"
                 disabled={!ready || job.running}
-                onClick={() => collect()}
+                onClick={() => {
+                  setRescanCollection(false);
+                  setCollectionDialog(true);
+                }}
               >
                 {job.running ? (
                   <LoaderCircle className="spin" size={16} />
@@ -442,6 +517,32 @@ export default function App() {
               </button>
             </div>
           </div>
+          {view === "leads" && collections.length > 0 && (
+            <div className="collection-bar">
+              <span>Saved leads</span>
+              <button
+                className={!collectionId ? "selected" : ""}
+                onClick={() => chooseCollection(null)}
+              >
+                All
+              </button>
+              {collections.map((c) => (
+                <button
+                  key={c.id}
+                  className={collectionId === c.id ? "selected" : ""}
+                  title={`${c.from_date} to ${c.to_date} · Last collected ${time(c.updated_at)}`}
+                  onClick={() => chooseCollection(c.id)}
+                >
+                  {c.label} <small>{c.total}</small>
+                </button>
+              ))}
+              {selectedCollection && (
+                <small className="collection-dates">
+                  {selectedCollection.from_date} → {selectedCollection.to_date}
+                </small>
+              )}
+            </div>
+          )}
           {error && (
             <div role="alert" className="banner error">
               <span>{error}</span>
@@ -471,12 +572,12 @@ export default function App() {
                   <strong>
                     {job.error
                       ? "Collection needs attention"
-                      : `${job.result!.new_leads} new leads · ${job.result!.remarks_added} email updates`}
+                      : `${job.result!.new_leads} new leads · ${job.result!.updated_leads} changed leads · ${job.result!.remarks_added} remark updates`}
                   </strong>
                   <span>
                     {job.error ||
                       job.result?.errors.join(" · ") ||
-                      ` ${job.result!.unparsed} unparsed · ${job.result!.pending} replies awaiting a matching lead`}
+                      ` ${job.result!.unparsed} unparsed · ${job.result!.out_of_range} outside range · ${job.result!.pending} unmatched replies`}
                   </span>
                 </div>
                 <button
@@ -571,6 +672,22 @@ export default function App() {
                       setPage(1);
                     }}
                   />
+                  <Select
+                    label="Sort leads"
+                    value={sort}
+                    choices={[
+                      "latest",
+                      "oldest",
+                      "name_asc",
+                      "name_desc",
+                      "call_id_asc",
+                      "call_id_desc",
+                    ]}
+                    onChange={(s) => {
+                      setSort(s);
+                      setPage(1);
+                    }}
+                  />
                   <div className="columns-wrap">
                     <button onClick={() => setColumnMenu(!columnMenu)}>
                       <Columns3 size={16} />
@@ -644,7 +761,11 @@ export default function App() {
                           {columns.map((key) => (
                             <td
                               key={key}
-                              title={display(lead[key as keyof Lead])}
+                              title={display(
+                                key === "remark"
+                                  ? lead.remark_preview
+                                  : lead[key as keyof Lead],
+                              )}
                             >
                               {key === "customer_name" ? (
                                 <button
@@ -664,6 +785,8 @@ export default function App() {
                                 >
                                   {lead.status}
                                 </span>
+                              ) : key === "remark" ? (
+                                display(lead.remark_preview || lead.remark)
                               ) : key === "updated_at" ? (
                                 time(lead.updated_at)
                               ) : (
@@ -724,7 +847,7 @@ export default function App() {
                   <span>
                     {loading
                       ? "Loading…"
-                      : `${leads.length} leads shown · page ${page}`}
+                      : `${pagination.total ? (page - 1) * 25 + 1 : 0}–${pagination.total ? (page - 1) * 25 + leads.length : 0} of ${pagination.total.toLocaleString()} leads · Page ${page} of ${pagination.pages}`}
                   </span>
                   <div>
                     <button
@@ -734,9 +857,28 @@ export default function App() {
                     >
                       <ChevronLeft size={16} />
                     </button>
+                    <label className="page-jump">
+                      Go to page
+                      <input
+                        aria-label="Go to page"
+                        type="number"
+                        min={1}
+                        max={pagination.pages}
+                        value={page}
+                        onChange={(e) => {
+                          const next = Number(e.target.value);
+                          if (
+                            Number.isInteger(next) &&
+                            next >= 1 &&
+                            next <= pagination.pages
+                          )
+                            setPage(next);
+                        }}
+                      />
+                    </label>
                     <button
                       aria-label="Next page"
-                      disabled={!hasMore}
+                      disabled={page >= pagination.pages}
                       onClick={() => setPage((p) => p + 1)}
                     >
                       <ChevronRight size={16} />
@@ -761,8 +903,10 @@ export default function App() {
               </div>
               <h2>IndiaMART lead master</h2>
               <p>
-                Every lead from the beginning through the cutoff date, with your
-                current sales updates and communication notes.
+                {selectedCollection
+                  ? `Leads in ${selectedCollection.label}, from ${selectedCollection.from_date} through the cutoff date.`
+                  : "Every saved lead from the beginning through the cutoff date."}{" "}
+                Includes your sales updates and dated remarks.
               </p>
               <label className="field">
                 Include enquiries through
@@ -789,7 +933,8 @@ export default function App() {
                 17 columns matching your supplied workbook
                 <br />
                 <Check size={16} />
-                Current response, relevance, temperature and Win/Lost fields
+                Customer response, relevance, Hot / Cold / Warm Deals and
+                Win/Lost fields
                 <br />
                 <Check size={16} />
                 Email activity and your sales notes in the Remark column
@@ -804,12 +949,24 @@ export default function App() {
             <SettingsPage
               onNotice={setNotice}
               onError={setError}
-              rescan={() => collect(true)}
+              rescan={() => {
+                setRescanCollection(true);
+                setCollectionDialog(true);
+              }}
               busy={job.running}
             />
           )}
         </div>
       </main>
+      {collectionDialog && (
+        <CollectionDialog
+          selected={selectedCollection}
+          rescan={rescanCollection}
+          busy={startingCollection}
+          start={collect}
+          onClose={() => !startingCollection && setCollectionDialog(false)}
+        />
+      )}
       {(detail || creating) && (
         <LeadDialog
           detail={detail}
@@ -827,6 +984,178 @@ export default function App() {
       )}
       {card && <CardDialog detail={card} onClose={() => setCard(null)} />}
     </div>
+  );
+}
+
+function CollectionDialog({
+  selected,
+  rescan,
+  busy,
+  start,
+  onClose,
+}: {
+  selected: Collection | null;
+  rescan: boolean;
+  busy: boolean;
+  start: (request: CollectionRequest) => Promise<void>;
+  onClose: () => void;
+}) {
+  const currentYear = new Date().getFullYear();
+  const [mode, setMode] = useState(selected ? "update" : "year");
+  const [year, setYear] = useState(selected?.year ?? currentYear);
+  const [from, setFrom] = useState(
+    selected?.from_date ?? `${currentYear}-01-01`,
+  );
+  const [to, setTo] = useState(selected?.to_date ?? localToday());
+  const [error, setError] = useState("");
+  const yearEnd = (y: number) =>
+    `${y}-12-31` < localToday() ? `${y}-12-31` : localToday();
+  const range =
+    mode === "update" && selected
+      ? {
+          from: selected.from_date,
+          to: selected.year ? yearEnd(selected.year) : selected.to_date,
+        }
+      : mode === "year"
+        ? { from: `${year}-01-01`, to: yearEnd(year) }
+        : { from, to };
+  async function submit() {
+    setError("");
+    const request: CollectionRequest =
+      mode === "update" && selected
+        ? { collection_id: selected.id, rescan }
+        : mode === "year"
+          ? { year, rescan }
+          : { from_date: from, to_date: to, rescan };
+    try {
+      await start(request);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <Modal
+      title={rescan ? "Rescan a collection" : "Collect leads from mail"}
+      onClose={onClose}
+    >
+      <div className="modal-body collection-form">
+        <p>
+          Choose the enquiry dates to collect. Saved leads stay on this PC;
+          opening a saved collection does not scan mail.
+        </p>
+        <label className="field">
+          Collection choice
+          <select
+            aria-label="Collection choice"
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+          >
+            {selected && (
+              <option value="update">Update {selected.label}</option>
+            )}
+            <option value="year">Choose a year</option>
+            <option value="custom">Custom date range</option>
+          </select>
+        </label>
+        {mode === "year" && (
+          <label className="field">
+            Year
+            <input
+              aria-label="Collection year"
+              type="number"
+              min={1900}
+              max={currentYear}
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value))}
+            />
+          </label>
+        )}
+        {mode === "custom" && (
+          <div className="form-grid">
+            <label className="field">
+              From
+              <input
+                aria-label="Collect from date"
+                type="date"
+                max={localToday()}
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              Through
+              <input
+                aria-label="Collect through date"
+                type="date"
+                min={from}
+                max={localToday()}
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+              />
+            </label>
+          </div>
+        )}
+        <div className="range-preview">
+          <strong>
+            {range.from} → {range.to}
+          </strong>
+          <small>
+            Enquiry dates, inclusive. New sent/received replies for these leads
+            are added to Remark, even if the reply arrived later.
+          </small>
+        </div>
+        {mode === "update" && (
+          <p className="muted">
+            Existing leads are kept. New enquiries and changed mail are
+            collected; unchanged messages are skipped.
+          </p>
+        )}
+        {rescan && (
+          <p className="muted">
+            Rescan checks the selected range from the beginning and retries
+            unparsed enquiries. Known mail is deduplicated.
+          </p>
+        )}
+        {error && (
+          <div role="alert" className="banner error">
+            {error}
+          </div>
+        )}
+      </div>
+      <footer className="modal-footer">
+        <div className="actions">
+          <button disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="primary"
+            disabled={
+              busy ||
+              !range.from ||
+              !range.to ||
+              range.from > range.to ||
+              range.to > localToday() ||
+              (mode === "year" &&
+                (!Number.isInteger(year) || year < 1900 || year > currentYear))
+            }
+            onClick={submit}
+          >
+            {busy ? (
+              <LoaderCircle className="spin" size={16} />
+            ) : (
+              <RefreshCw size={16} />
+            )}
+            {busy
+              ? "Starting…"
+              : rescan
+                ? "Rescan selected range"
+                : mode === "update"
+                  ? "Update saved collection"
+                  : "Collect selected range"}
+          </button>
+        </div>
+      </footer>
+    </Modal>
   );
 }
 
@@ -1112,6 +1441,21 @@ function LeadDialog({
             }
           />
         )}
+        {key === "category" && (
+          <small>Category provided in the enquiry email.</small>
+        )}
+        {key === "deal_temperature" && (
+          <small>
+            Hot: buying soon · Warm: within 2 months · Cold: more than 2 to 6
+            months.
+          </small>
+        )}
+        {key === "remark" && (
+          <small>
+            Your editable remark. Dated email replies and conversation notes
+            appear below and are included in the Excel Remark column.
+          </small>
+        )}
       </label>
     );
   };
@@ -1196,6 +1540,12 @@ function LeadDialog({
                 ].map(input)}
               </div>
             </div>
+            {detail && detail.remark_text && (
+              <section className="remark-history">
+                <h3>Remark · saved conversation</h3>
+                <p>{detail.remark_text}</p>
+              </section>
+            )}
           </>
         )}
         {tab === "Activity" && detail && (

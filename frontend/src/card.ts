@@ -9,7 +9,9 @@ export function renderCard(detail: Detail, selected: string[]) {
     const raw =
       key === "enquiry_time"
         ? detail.enquiry_time
-        : String(detail.lead[key as keyof typeof detail.lead] ?? "");
+        : key === "remark"
+          ? detail.remark_text
+          : String(detail.lead[key as keyof typeof detail.lead] ?? "");
     const value = raw || "Not recorded";
     const lines: string[] = [];
     for (const paragraph of value.split("\n")) {

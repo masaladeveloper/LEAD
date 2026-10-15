@@ -24,6 +24,8 @@ class SyncResult:
     emails_read: int = 0
     new_leads: int = 0
     existing_leads: int = 0
+    updated_leads: int = 0
+    out_of_range: int = 0
     remarks_added: int = 0
     unparsed: int = 0
     pending: int = 0
@@ -107,7 +109,12 @@ def _occurred_at(value):
         return ''
 
 
-def _resolve_pending(database, my_email, result):
+def _in_range(lead, from_date, to_date):
+    stamp = lead.get('enquiry_date') or ''
+    return (not from_date or stamp >= from_date) and (not to_date or stamp <= to_date)
+
+
+def _resolve_pending(database, my_email, result, from_date='', to_date=''):
     # Revisit unmatched replies, including ones seen before their parent lead or
     # in an earlier folder. Mapping every reply supports replies-to-replies.
     while True:
@@ -122,7 +129,7 @@ def _resolve_pending(database, my_email, result):
                 # A subject alone is insufficient for mail from an unknown sender.
                 if candidate and sender in {my_email.casefold(), str(candidate.get('email_id') or '').casefold()} - {''}:
                     parent = candidate
-            if not parent:
+            if not parent or not _in_range(parent, from_date, to_date):
                 continue
             outgoing = sender == my_email.casefold() and bool(my_email)
             with database.transaction():
@@ -136,15 +143,20 @@ def _resolve_pending(database, my_email, result):
             resolved += 1
         if not resolved:
             break
-    result.pending = database.connection.execute("SELECT COUNT(*) FROM email_messages WHERE kind = 'pending'").fetchone()[0]
+    result.pending = 0
+    for row in database.connection.execute("SELECT payload FROM email_messages WHERE kind = 'pending'"):
+        payload = json.loads(row['payload'])
+        candidate = database.find_lead_by_message_id(payload['references']) or database.find_by_call_id(payload['call_id'])
+        if not candidate or _in_range(candidate, from_date, to_date):
+            result.pending += 1
 
 
-def _ingest(database, path, senders, my_email, result, force=False, settle_seconds=2):
+def _ingest(database, path, senders, my_email, result, force=False, settle_seconds=2, from_date='', to_date='', scope=''):
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f'Mailbox not found: {path}')
     # Changing source filters must allow previously ignored enquiries to be read.
-    key = 'mailbox_v2:' + hashlib.sha256((str(path) + '|' + ','.join(sorted(senders))).encode()).hexdigest()
+    key = 'mailbox_v2:' + hashlib.sha256((str(path) + '|' + ','.join(sorted(senders)) + ('|' + scope if scope else '')).encode()).hexdigest()
     try:
         checkpoint = json.loads(database.get_setting(key, '{}'))
         if not isinstance(checkpoint, dict):
@@ -153,7 +165,7 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
     except (ValueError, TypeError):
         checkpoint, offset = {}, 0
     before = path.stat()
-    if force or offset < 0 or offset > before.st_size or checkpoint.get('prefix') != _prefix_hash(path, offset):
+    if force or (to_date and checkpoint.get('to_date', '') < to_date) or offset < 0 or offset > before.st_size or checkpoint.get('prefix') != _prefix_hash(path, offset):
         offset = 0
     next_offset = offset
     for next_offset, raw in _messages_since(path, offset, settle_seconds):
@@ -174,6 +186,10 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
                 except ValueError as error:
                     parse_error = str(error)
             if lead:
+                if not _in_range(lead, from_date, to_date):
+                    result.out_of_range += 1
+                    continue
+                previous_lead = database.find_by_call_id(lead.get('lead_id')) or database.find_lead_by_message_id([message_id])
                 lead['message_id'] = message_id
                 try:
                     lead_id, created = database.upsert_source_lead(lead)
@@ -184,6 +200,7 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
                     continue
                 result.new_leads += int(created)
                 result.existing_leads += int(not created)
+                result.updated_leads += int(not created and previous_lead is not None and database.get_lead(lead_id)['revision'] != previous_lead['revision'])
                 database.connection.execute("""INSERT INTO email_messages VALUES (?, ?, 'source', '', ?)
                     ON CONFLICT(message_id) DO UPDATE SET lead_id=excluded.lead_id, content_hash=excluded.content_hash, kind='source', payload='' """, (message_id, lead_id, content_hash))
                 database.add_activity(lead_id, 'enquiry', f'Enquiry received: {mail.subject}', mail.sender, _occurred_at(mail.date), message_id)
@@ -201,9 +218,19 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
             if not body:
                 continue
             if previous and previous['kind'] == 'reply':
+                parent = database.get_lead(previous['lead_id'])
+                if not parent or not _in_range(parent, from_date, to_date):
+                    continue
                 # A tail record can be completed between scans: update its one activity.
-                database.connection.execute('UPDATE activities SET body=? WHERE message_id=?', (body, message_id))
+                stamp = _occurred_at(mail.date)
+                changed = database.connection.execute('''UPDATE activities SET body=?, sender=?,
+                    occurred_at=COALESCE(NULLIF(?,''),occurred_at) WHERE message_id=?
+                    AND (body<>? OR sender<>? OR (?<>'' AND occurred_at<>?))''',
+                    (body, mail.sender, stamp, message_id, body, mail.sender, stamp, stamp)).rowcount
                 database.connection.execute('UPDATE email_messages SET content_hash=? WHERE message_id=?', (content_hash, message_id))
+                if changed:
+                    database.connection.execute('UPDATE leads SET revision=revision+1, updated_at=CURRENT_TIMESTAMP WHERE id=?', (parent['id'],))
+                    result.remarks_added += 1
                 continue
             payload = json.dumps(dict(references=references, call_id=call_id, body=body, sender=mail.sender, date=_occurred_at(mail.date)))
             database.connection.execute("""INSERT INTO email_messages VALUES (?, NULL, 'pending', ?, ?)
@@ -211,20 +238,25 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
     after = path.stat()
     if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
         raise RuntimeError(f'{path.name} changed during sync. It will be retried automatically.')
-    database.set_setting(key, json.dumps({'offset':next_offset, 'prefix':_prefix_hash(path, next_offset)}))
+    database.set_setting(key, json.dumps({'offset':next_offset, 'prefix':_prefix_hash(path, next_offset), 'to_date':to_date}))
 
 
-def sync_mailboxes(database, mailbox_paths, sender_filter, my_email, *, force=False, settle_seconds=2):
+def sync_mailboxes(database, mailbox_paths, sender_filter, my_email, *, force=False, settle_seconds=2, from_date='', to_date='', scope=''):
+    from_date, to_date = as_iso_date(from_date), as_iso_date(to_date)
+    if from_date and to_date and from_date > to_date:
+        raise ValueError('The start date must be before the end date.')
+    if (from_date or to_date) and not scope:
+        scope = f'range:{from_date}:{to_date}'
     senders = {parseaddr(s.strip())[1].casefold() for s in sender_filter.split(',') if s.strip()}
     if not senders or any('@' not in s for s in senders):
         raise ValueError('Enter the exact enquiry sender email address in Email settings.')
     result = SyncResult()
     for path in dict.fromkeys(p for p in mailbox_paths if p):
         try:
-            _ingest(database, path, senders, my_email, result, force, settle_seconds)
+            _ingest(database, path, senders, my_email, result, force, settle_seconds, from_date, to_date, scope)
         except (OSError, ValueError, RuntimeError) as error:
             result.errors.append(str(error))
-    _resolve_pending(database, my_email, result)
+    _resolve_pending(database, my_email, result, from_date, to_date)
     return result
 
 

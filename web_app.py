@@ -20,8 +20,8 @@ from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from config import DATABASE_PATH
-from crm_database import LeadDatabase, SOURCE_COLUMNS, CRM_COLUMNS, STATUSES, StaleLeadError
-from report_service import export_report
+from crm_database import LeadDatabase, SOURCE_COLUMNS, CRM_COLUMNS, STATUSES, StaleLeadError, as_iso_date
+from report_service import export_report, lead_remarks
 from thunderbird_sync import sync_mailboxes
 
 ROOT = Path(__file__).resolve().parent
@@ -66,7 +66,39 @@ class Settings(BaseModel):
 
 
 class SyncRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     rescan: bool = False
+    collection_id: int | None = Field(default=None, ge=1)
+    year: int | None = Field(default=None, ge=1900, le=9999)
+    from_date: str = ''
+    to_date: str = ''
+
+
+def collection_range(body, db):
+    """Collection ranges select the enquiry date; later replies remain eligible."""
+    if body.collection_id is not None:
+        if body.year is not None or body.from_date or body.to_date:
+            raise ValueError('Choose one saved collection, year or custom range.')
+        saved = db.collection(body.collection_id)
+        if not saved:
+            raise ValueError('This saved collection no longer exists.')
+        year = saved['year']
+        start, end = saved['from_date'], saved['to_date']
+    else:
+        if body.year is not None and (body.from_date or body.to_date):
+            raise ValueError('Choose a year or custom dates, not both.')
+        year = body.year if body.year is not None else (None if body.from_date or body.to_date else date.today().year)
+        start, end = body.from_date, body.to_date
+    if year is not None:
+        if year > date.today().year:
+            raise ValueError('Choose the current year or an earlier year.')
+        start = date(year, 1, 1).isoformat()
+        end = min(date(year, 12, 31), date.today()).isoformat()
+        return {'scope_key':f'year:{year}', 'label':str(year), 'year':year, 'from_date':start, 'to_date':end}
+    start, end = as_iso_date(start), as_iso_date(end)
+    if not start or not end or start > end or end > date.today().isoformat():
+        raise ValueError('Choose a start and end date, in order, no later than today.')
+    return {'scope_key':f'range:{start}:{end}', 'label':f'{start} – {end}', 'year':None, 'from_date':start, 'to_date':end}
 
 
 def create_app(database_path=DATABASE_PATH, static_directory=None):
@@ -74,7 +106,7 @@ def create_app(database_path=DATABASE_PATH, static_directory=None):
     token = secrets.token_urlsafe(32)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='mail-sync')
     lock = threading.Lock()
-    job = {'running': False, 'result': None, 'error': '', 'finished_at': ''}
+    job = {'running': False, 'result': None, 'error': '', 'finished_at': '', 'collection': None}
 
     @contextmanager
     def database():
@@ -138,7 +170,7 @@ def create_app(database_path=DATABASE_PATH, static_directory=None):
                 event['occurred_at'] = local_timestamp(event['occurred_at'])
         history = [{**h, 'saved_at': local_timestamp(h['saved_at'])} for h in db.history(lead_id)]
         return {'lead': lead_for_browser(lead), 'activities': activity, 'history': history,
-                'reminders': db.reminders(lead_id), 'enquiry_time': source['occurred_at'] if source else ''}
+                'reminders': db.reminders(lead_id), 'remark_text': lead_remarks(db, lead), 'enquiry_time': source['occurred_at'] if source else ''}
 
     @app.get('/api/health')
     def health():
@@ -148,14 +180,30 @@ def create_app(database_path=DATABASE_PATH, static_directory=None):
     def session():
         return {'token': token, 'statuses': STATUSES}
 
+    @app.get('/api/collections')
+    def collections():
+        with database() as db:
+            return [{**row, 'updated_at': local_timestamp(row['updated_at'])} for row in db.collections()]
+
     @app.get('/api/leads')
-    def leads(q: str = Query('', max_length=300), status: str = 'All leads', page: int = Query(1, ge=1), size: int = Query(25, ge=10, le=100)):
+    def leads(q: str = Query('', max_length=300), status: str = 'All leads', page: int = Query(1, ge=1),
+              size: int = Query(25, ge=10, le=100), collection_id: int | None = Query(None, ge=1), sort: str = 'latest'):
         if status not in (*STATUSES, 'All leads', 'Open leads', 'Follow-ups due', 'Upcoming follow-ups'):
             raise ValueError('Choose a valid filter.')
         with database() as db:
-            # Fetch one extra row to avoid loading the full database for pagination.
-            rows = db.search(q, size + 1, status, offset=(page - 1) * size)
-            return {'leads': [lead_for_browser(r) for r in rows[:size]], 'has_more': len(rows) > size, 'counts': db.counts()}
+            start, end = '', ''
+            if collection_id is not None:
+                saved = db.collection(collection_id)
+                if not saved:
+                    raise HTTPException(404, 'Saved collection not found.')
+                start, end = saved['from_date'], saved['to_date']
+            total = db.count_leads(q, status, start, end)
+            pages = max(1, (total + size - 1) // size)
+            page = min(page, pages)
+            rows = db.search(q, size, status, offset=(page - 1) * size, from_date=start, to_date=end, sort=sort)
+            return {'leads': [{**lead_for_browser(r), 'remark_preview': lead_remarks(db, r)} for r in rows],
+                    'has_more': page < pages, 'counts': db.counts(start, end), 'total': total, 'pages': pages,
+                    'page': page, 'size': size}
 
     @app.get('/api/leads/{lead_id}')
     def get_lead(lead_id: int):
@@ -250,32 +298,38 @@ def create_app(database_path=DATABASE_PATH, static_directory=None):
             db.set_setting('my_email', my_email)
         return {'ok': True}
 
-    def collect(rescan):
+    def collect(rescan, selected_range):
         try:
             with database() as db:
                 if db.get_setting('last_auto_backup') != date.today().isoformat():
                     db.backup()
                     db.set_setting('last_auto_backup', date.today().isoformat())
-                result = sync_mailboxes(db, db.mailbox_paths(), db.get_setting('sender_filter'), db.get_setting('my_email'), force=rescan)
+                result = sync_mailboxes(db, db.mailbox_paths(), db.get_setting('sender_filter'), db.get_setting('my_email'), force=rescan,
+                                        from_date=selected_range['from_date'], to_date=selected_range['to_date'], scope=selected_range['scope_key'])
+                saved = db.save_collection(**selected_range) if not result.errors else None
+                if saved:
+                    saved['updated_at'] = local_timestamp(saved['updated_at'])
                 with lock:
                     job['result'] = asdict(result)
+                    job['collection'] = saved
         except Exception as error:
             with lock:
                 job['error'] = str(error)
         finally:
             with lock:
-                job.update(running=False, finished_at=datetime.now().isoformat(timespec='seconds'))
+                job.update(running=False, finished_at=datetime.now().isoformat(timespec='microseconds'))
 
     @app.post('/api/sync', status_code=202)
     def sync(body: SyncRequest):
         with database() as db:
             if not db.mailbox_paths() or not db.get_setting('sender_filter'):
                 raise ValueError('Configure Thunderbird in Settings before collecting leads.')
+            selected_range = collection_range(body, db)
         with lock:
             if job['running']:
                 raise HTTPException(409, 'Collection is already running.')
-            job.update(running=True, result=None, error='', finished_at='')
-            executor.submit(collect, body.rescan)
+            job.update(running=True, result=None, error='', finished_at='', collection=None)
+            executor.submit(collect, body.rescan, selected_range)
             return dict(job)
 
     @app.get('/api/sync')
@@ -289,12 +343,19 @@ def create_app(database_path=DATABASE_PATH, static_directory=None):
             return {'path': str(db.backup())}
 
     @app.get('/api/report')
-    def report(through: str = ''):
+    def report(through: str = '', collection_id: int | None = Query(None, ge=1)):
         temporary = tempfile.TemporaryDirectory(prefix='lead-report-')
         try:
             destination = Path(temporary.name) / 'Lead Master.xlsx'
             with database() as db:
-                export_report(db, destination, to_date=through)
+                start, end = '', through
+                if collection_id is not None:
+                    saved = db.collection(collection_id)
+                    if not saved:
+                        raise HTTPException(404, 'Saved collection not found.')
+                    start = saved['from_date']
+                    end = min(as_iso_date(through) or saved['to_date'], saved['to_date'])
+                export_report(db, destination, from_date=start, to_date=end)
             return FileResponse(destination, filename=f'Lead Master through {through or date.today().isoformat()}.xlsx',
                                 media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                 background=BackgroundTask(temporary.cleanup))

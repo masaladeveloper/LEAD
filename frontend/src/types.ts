@@ -22,6 +22,7 @@ export type Lead = {
   follow_up_date: string;
   updated_at: string;
   created_at: string;
+  remark_preview?: string;
 };
 export type Activity = {
   id: number;
@@ -53,6 +54,7 @@ export type Detail = {
   history: History[];
   reminders: Reminder[];
   enquiry_time: string;
+  remark_text: string;
 };
 export type Settings = {
   mailbox_paths: string[];
@@ -60,12 +62,31 @@ export type Settings = {
   my_email: string;
   database_path?: string;
 };
+export type Collection = {
+  id: number;
+  label: string;
+  year: number | null;
+  from_date: string;
+  to_date: string;
+  updated_at: string;
+  total: number;
+};
+export type CollectionRequest = {
+  collection_id?: number;
+  year?: number;
+  from_date?: string;
+  to_date?: string;
+  rescan?: boolean;
+};
 export type Job = {
   running: boolean;
   finished_at: string;
+  collection?: Collection | null;
   error: string;
   result: null | {
     new_leads: number;
+    updated_leads: number;
+    out_of_range: number;
     remarks_added: number;
     unparsed: number;
     pending: number;
@@ -84,12 +105,12 @@ export const fields: Record<string, string> = {
   quantity: "Quantity",
   city: "City",
   dealer: "Dealer",
-  voice_of_customer: "Customer requirement",
-  category: "Source category",
-  remark: "Sales notes",
-  responded: "Customer response",
-  relevance: "Relevance",
-  deal_temperature: "Temperature",
+  voice_of_customer: "Voice of Customer",
+  category: "Category",
+  remark: "Remark",
+  responded: "Customer Responded or Not",
+  relevance: "Relevant / Irrelevant deals",
+  deal_temperature: "Hot / Cold / Warm Deals",
   status: "Status",
   follow_up_date: "Next follow-up",
   enquiry_time: "Email date & time",

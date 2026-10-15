@@ -1,5 +1,7 @@
 """HTTP and storage regressions for the PC-only app, using synthetic data."""
 from io import BytesIO
+from datetime import date
+from unittest.mock import patch
 import mailbox
 import os
 from pathlib import Path
@@ -12,11 +14,19 @@ from openpyxl import load_workbook
 from crm_database import LeadDatabase
 from web_app import create_app
 from thunderbird_sync import sync_mailboxes
-from test_workflows import enquiry
+from test_workflows import enquiry, reply
+
+
+class CollectionDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 10, 15)
 
 
 class Web(unittest.TestCase):
     def setUp(self):
+        self.clock = patch('web_app.date', CollectionDate)
+        self.clock.start()
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.path = self.root / 'crm.db'
@@ -31,6 +41,7 @@ class Web(unittest.TestCase):
     def tearDown(self):
         self.client.__exit__(None,None,None)
         self.temp.cleanup()
+        self.clock.stop()
 
     def request(self, method, path, body=None):
         return self.client.request(method, path, headers=self.token, json=body)
@@ -61,9 +72,9 @@ class Web(unittest.TestCase):
         self.assertEqual(r.json()['history'][0]['snapshot']['remark'],'Note 6')
 
     def test_permanent_keeps_details_notes_and_protection(self):
-        d=self.edit({'customer_name':'Corrected','remark':'Keep this'})
+        self.edit({'customer_name':'Corrected','remark':'Keep this'})
         self.request('POST',f'/api/leads/{self.lead_id}/notes',{'body':'A conversation'})
-        r=self.request('DELETE',f'/api/leads/{self.lead_id}/history',{'revision':d['lead']['revision']})
+        r=self.request('DELETE',f'/api/leads/{self.lead_id}/history',{'revision':self.detail()['lead']['revision']})
         self.assertEqual(r.status_code,200,r.text)
         self.assertEqual(r.json()['history'],[])
         self.assertEqual(r.json()['lead']['remark'],'Keep this')
@@ -193,6 +204,132 @@ class Web(unittest.TestCase):
         self.assertEqual(r.json()['lead']['status'],'Follow-up')
         self.assertEqual(self.request('POST','/api/leads',{'revision':0,'values':{'customer_name':'Duplicate','lead_id':'new'}}).status_code,400)
 
+    def wait_for_collection(self):
+        for _ in range(150):
+            job = self.client.get('/api/sync').json()
+            if not job['running']:
+                self.assertFalse(job['error'], job)
+                self.assertEqual(job['result']['errors'], [], job)
+                return job
+            time.sleep(.02)
+        self.fail('Collection did not finish')
+
+    def prepare_range_mailbox(self):
+        path = self.root / 'RANGE-INBOX'
+        box = mailbox.mbox(path)
+        for call_id, stamp, name in (('2501','2025-12-31','Earlier Buyer'),
+                                     ('2601','2026-01-01','Alpha Buyer'),
+                                     ('2615','2026-10-15','Zulu Buyer'),
+                                     ('2701','2027-01-01','Future Buyer')):
+            msg = enquiry(call_id, f'<{call_id}@example.test>', name)
+            msg.clear_content()
+            msg.set_content(f'<table><tr><td>Date</td><td>{stamp}</td></tr><tr><td>Name</td><td>{name}</td></tr><tr><td>Email</td><td>buyer@example.test</td></tr><tr><td>Voice of Customer</td><td>Needs 215L</td></tr><tr><td>Category</td><td>HOT LEAD</td></tr></table>', subtype='html')
+            box.add(msg)
+        box.close(); os.utime(path, (1, 1))
+        r = self.request('PUT','/api/settings', {'mailbox_paths':[str(path)],'sender_filter':'leads@example.test','my_email':'sales@example.test'})
+        self.assertEqual(r.status_code, 200)
+        return path
+
+    def test_year_collection_is_inclusive_saved_and_persistent(self):
+        self.prepare_range_mailbox()
+        self.assertEqual(self.request('POST','/api/sync',{'year':2026}).status_code,202)
+        job = self.wait_for_collection()
+        self.assertEqual(job['result']['new_leads'],2)
+        saved = job['collection']
+        self.assertEqual(saved['label'],'2026')
+        self.assertEqual((saved['from_date'], saved['to_date']),('2026-01-01','2026-10-15'))
+        db = LeadDatabase(self.path)
+        checkpoints = dict(db.connection.execute("SELECT key,value FROM settings WHERE key LIKE 'mailbox_v2:%'"))
+        db.close()
+        data = self.client.get('/api/leads',params={'collection_id':saved['id']}).json()
+        self.assertEqual([x['customer_name'] for x in data['leads']], ['Zulu Buyer','Synthetic Buyer','Alpha Buyer'])
+        db = LeadDatabase(self.path)
+        self.assertEqual(db.collections()[0]['id'],saved['id'])
+        self.assertEqual(dict(db.connection.execute("SELECT key,value FROM settings WHERE key LIKE 'mailbox_v2:%'")),checkpoints)
+        self.assertIsNone(db.find_by_call_id('2501'))
+        self.assertIsNone(db.find_by_call_id('2701'))
+        db.close()
+
+    def test_separate_ranges_do_not_lose_skipped_older_enquiries(self):
+        self.prepare_range_mailbox()
+        self.request('POST','/api/sync',{'year':2026}); year26=self.wait_for_collection()['collection']
+        self.request('POST','/api/sync',{'year':2025}); year25=self.wait_for_collection()['collection']
+        self.assertEqual(self.client.get('/api/leads',params={'collection_id':year25['id']}).json()['total'],1)
+        self.assertEqual(self.client.get('/api/leads',params={'collection_id':year26['id']}).json()['total'],3)
+        self.assertEqual(len(self.client.get('/api/collections').json()),2)
+        self.request('POST','/api/sync',{'collection_id':year26['id']})
+        unchanged=self.wait_for_collection()
+        self.assertEqual((unchanged['result']['new_leads'],unchanged['result']['updated_leads'],unchanged['result']['remarks_added']),(0,0,0))
+        self.assertEqual(len(self.client.get('/api/collections').json()),2)
+
+    def test_updates_append_dated_remarks_only_to_selected_year(self):
+        path=self.prepare_range_mailbox()
+        self.request('POST','/api/sync',{'year':2026}); saved=self.wait_for_collection()['collection']
+        self.request('POST','/api/sync',{'year':2025}); old=self.wait_for_collection()['collection']
+        db=LeadDatabase(self.path); target=db.find_by_call_id('2601'); old_lead=db.find_by_call_id('2501'); db.close()
+        before=self.client.get(f'/api/leads/{target["id"]}').json()['lead']['revision']
+        box=mailbox.mbox(path)
+        first=reply('<sales-range@example.test>','<2601@example.test>',body='Discussed the 215L requirement.')
+        second=reply('<buyer-range@example.test>','<sales-range@example.test>',sender='buyer@example.test',body='Loan arranged with a bank.')
+        second.replace_header('Date','Thu, 15 Oct 2026 11:00:00 +0000')
+        old_reply=reply('<old-range@example.test>','<2501@example.test>',body='Older customer update')
+        for msg in (first,second,old_reply):box.add(msg)
+        box.close();os.utime(path,(1,1))
+        self.request('POST','/api/sync',{'collection_id':saved['id']}); job=self.wait_for_collection()
+        self.assertEqual(job['result']['remarks_added'],2)
+        detail=self.client.get(f'/api/leads/{target["id"]}').json()
+        self.assertEqual(detail['lead']['voice_of_customer'],'Needs 215L')
+        self.assertEqual(detail['lead']['category'],'Hot')
+        self.assertGreater(detail['lead']['revision'],before)
+        self.assertIn('Loan arranged with a bank.',detail['remark_text'])
+        self.assertLess(detail['remark_text'].index('Discussed'),detail['remark_text'].index('Loan'))
+        self.assertIn('2026-10-15',detail['remark_text'])
+        self.assertNotIn('Older customer',self.client.get(f'/api/leads/{old_lead["id"]}').json()['remark_text'])
+        self.request('POST','/api/sync',{'collection_id':saved['id']}); repeated=self.wait_for_collection()
+        self.assertEqual(repeated['result']['remarks_added'],0)
+        again=self.client.get(f'/api/leads/{target["id"]}').json()
+        self.assertEqual(again['lead']['revision'],detail['lead']['revision'])
+        self.assertEqual(again['remark_text'].count('Loan arranged'),1)
+        self.request('POST','/api/sync',{'collection_id':old['id']}); self.wait_for_collection()
+        self.assertIn('Older customer',self.client.get(f'/api/leads/{old_lead["id"]}').json()['remark_text'])
+        report=self.client.get('/api/report',params={'collection_id':saved['id'],'through':'2026-10-15'})
+        book=load_workbook(BytesIO(report.content)); rows=list(book.active.iter_rows(min_row=2,values_only=True))
+        exported=next(row for row in rows if row[1]=='2601')
+        self.assertEqual(exported[8],'Needs 215L')
+        self.assertEqual(exported[9],again['remark_text'])
+        self.assertNotIn('Earlier Buyer',[row[3] for row in rows]); book.close()
+
+    def test_custom_range_and_invalid_collection_inputs(self):
+        self.prepare_range_mailbox()
+        for body in ({'from_date':'2026-02-01','to_date':'2026-01-01'}, {'from_date':'bad','to_date':'2026-10-15'},
+                     {'year':2027}, {'collection_id':999}, {'year':2026,'from_date':'2026-01-01'},
+                     {'from_date':'2026-01-01','to_date':'2027-01-01'}):
+            self.assertEqual(self.request('POST','/api/sync',body).status_code,400)
+        self.assertEqual(self.client.get('/api/collections').json(),[])
+        self.request('POST','/api/sync',{'from_date':'2026-01-01','to_date':'2026-01-01'})
+        saved=self.wait_for_collection()['collection']
+        data=self.client.get('/api/leads',params={'collection_id':saved['id']}).json()
+        self.assertEqual(data['total'],1)
+        self.assertEqual(data['leads'][0]['customer_name'],'Alpha Buyer')
+        self.assertEqual(self.client.get('/api/leads?sort=bad').status_code,400)
+        self.assertEqual(self.client.get('/api/leads?collection_id=999').status_code,404)
+
+    def test_sort_totals_page_count_and_clamping(self):
+        db=LeadDatabase(self.path)
+        for n in range(31):db.upsert_source_lead({'lead_id':f'sort{n}','customer_name':f'Buyer {n:02}','enquiry_date':'2026-01-01'})
+        db.close()
+        data=self.client.get('/api/leads').json()
+        self.assertEqual((data['total'],data['pages'],data['page']),(32,2,1))
+        self.assertEqual(data['leads'][0]['customer_name'],'Synthetic Buyer')
+        self.assertEqual(self.client.get('/api/leads?sort=oldest').json()['leads'][0]['customer_name'],'Buyer 00')
+        self.assertEqual(self.client.get('/api/leads?sort=name_asc').json()['leads'][0]['customer_name'],'Buyer 00')
+        self.assertEqual(self.client.get('/api/leads?sort=name_desc').json()['leads'][0]['customer_name'],'Synthetic Buyer')
+        last=self.client.get('/api/leads?page=999').json()
+        self.assertEqual((last['page'],len(last['leads'])),(2,7))
+        filtered=self.client.get('/api/leads?q=Buyer%200').json()
+        self.assertEqual((filtered['total'],filtered['pages']),(10,1))
+
+
 
 class Extraction(unittest.TestCase):
     def test_variants_plain_text_bad_quantity_and_checkpoint_recovery(self):
@@ -217,6 +354,42 @@ class Extraction(unittest.TestCase):
             self.assertEqual(retry.new_leads,0)
             self.assertEqual(db.counts()['total'],2)
             db.close()
+
+    def test_year_cutoff_extension_revisits_previously_excluded_mail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); db=LeadDatabase(root/'crm.db'); path=root/'INBOX'; box=mailbox.mbox(path)
+            older=enquiry('401','<before-cutoff@example.test>')
+            newer=enquiry('402','<after-cutoff@example.test>'); newer.clear_content()
+            newer.set_content('Date: 2026-10-15\nName: Later Buyer\nPhone: 9876543212')
+            box.add(older); box.add(newer); box.close();os.utime(path,(1,1))
+            first=sync_mailboxes(db,[path],'leads@example.test','sales@example.test',settle_seconds=0,
+                                from_date='2026-01-01',to_date='2026-10-14',scope='year:2026')
+            self.assertEqual(first.new_leads,1)
+            extended=sync_mailboxes(db,[path],'leads@example.test','sales@example.test',settle_seconds=0,
+                                   from_date='2026-01-01',to_date='2026-10-15',scope='year:2026')
+            self.assertEqual(extended.new_leads,1)
+            self.assertEqual(db.counts()['total'],2)
+            db.close()
+
+    def test_changed_tail_updates_one_remark_but_header_only_changes_do_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); db=LeadDatabase(root/'crm.db'); path=root/'INBOX'; box=mailbox.mbox(path)
+            box.add(enquiry()); item=reply(body='First response'); box.add(item); box.close();os.utime(path,(1,1))
+            sync_mailboxes(db,[path],'leads@example.test','sales@example.test',settle_seconds=0,
+                           from_date='2026-01-01',to_date='2026-10-15',scope='year:2026')
+            box=mailbox.mbox(path); item.set_content('Updated response: loan approved'); box[1]=item;box.flush();box.close();os.utime(path,(1,1))
+            changed=sync_mailboxes(db,[path],'leads@example.test','sales@example.test',settle_seconds=0,
+                                   from_date='2026-01-01',to_date='2026-10-15',scope='year:2026')
+            self.assertEqual(changed.remarks_added,1)
+            self.assertEqual(len([a for a in db.activities(1) if a['kind']=='sent']),1)
+            revision=db.get_lead(1)['revision']
+            box=mailbox.mbox(path);item['X-Test-Header']='changed';box[1]=item;box.flush();box.close();os.utime(path,(1,1))
+            unchanged=sync_mailboxes(db,[path],'leads@example.test','sales@example.test',settle_seconds=0,
+                                     from_date='2026-01-01',to_date='2026-10-15',scope='year:2026')
+            self.assertEqual(unchanged.remarks_added,0)
+            self.assertEqual(db.get_lead(1)['revision'],revision)
+            db.close()
+
 
 
 if __name__ == '__main__':

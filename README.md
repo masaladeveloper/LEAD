@@ -12,11 +12,11 @@ saved on your PC. No account, cloud database or mail-provider login is required.
 ## What the first version does
 
 - **Collect from mail:** read Inbox and optional Sent folders with one click;
-  extract supported enquiries, prevent duplicates and attach matching replies.
+  choose a year or custom enquiry-date range, prevent duplicates and attach matching replies. Completed collections stay available as saved buttons, such as **2026**.
 - **Review leads:** search by Call ID, name, phone, email, model, city, requirement,
   notes or other recorded fields. Select and resize table columns; browse 25 rows
-  per page. Open a customer for the complete details.
-- **Edit sales fields:** response, relevance, temperature, notes, next follow-up and
+  per page, with matching lead totals, page counts and a page jump. Sort by date or name/Call ID in either direction; newest enquiry first is the default. Open a customer for the complete details.
+- **Edit sales fields:** response, relevance, Hot / Cold / Warm Deals, Remark, next follow-up and
   status (New, In process, Follow-up, Quotation Sent, Won, Lost or Closed).
 - **Undo mistakes:** keep up to five previous versions of saved lead edits.
   Preview a version, restore it, or keep current values and clear the undo history
@@ -68,6 +68,15 @@ If port 8000 is occupied, choose another:
 .\start.ps1 -Port 8010
 ```
 
+### Update an existing installation
+
+Stop the server with Ctrl+C. Extract the new ZIP into your existing
+`Muneer-Lead-Workspace` folder, replacing its application files, then run
+`start.ps1` again. Keep `.web-venv` to reuse the installed dependencies; if using a
+new folder, run `setup.ps1` there once. The normal Windows database is outside the
+application folder and your saved leads/edits are retained. If you set
+`LEAD_CRM_DATA_DIR`, start with the same value to use the same database.
+
 ### Option B: run from this repository
 
 Install **Python 3.11+** and **Node.js 22+**, then run `setup.ps1` and `start.ps1` as
@@ -106,13 +115,41 @@ finished app serves the interface and API through one Python server.
    the backend reads the local paths you enter here.
 5. Enter the exact enquiry sender email address (comma-separated for multiple)
    and your sales email, then **Save email settings**.
-6. Click **Collect from mail**. Keep Thunderbird downloading the mail.
+6. Click **Collect from mail**, choose the year (2026 defaults to January 1 through today) or custom dates, then **Collect selected range**. Keep Thunderbird downloading the mail.
 
-The first collection scans historical enquiries. Later collections process new
-mail and revisit the final record safely. **Rescan folders** retries old mail after
-settings or parser changes; it does not duplicate known messages or leads.
-Collection runs in the background while you work. Folder errors, unparsed
-subjects/reasons (up to 100 per run) and unmatched reply counts are shown.
+### Saved collections and updates
+
+The first collection scans the selected enquiry dates, inclusively. The range is
+based on the enquiry's **Enq Date**, rather than the reply's received date. Selecting
+2026 collects January 1, 2026 through today (or December 31 for a completed year).
+A **2026** button appears after collection completes successfully. Custom ranges
+get their own saved buttons. Empty successful collections are saved too.
+
+Click a saved button to open data already stored in SQLite. This makes no mail
+collection request. The last selected collection is remembered in this browser.
+Click **Collect from mail** again to choose **Update 2026**, another year, or custom
+start/end dates. Updating the current year extends its cutoff to today. Updating
+a custom range keeps its original dates; choose a new range to extend it.
+
+Only new or changed messages affect leads. Subsequent collections use a checkpoint
+for that range, revisit the final mailbox record safely and skip known message
+content. Selecting a different range has its own checkpoint, so collecting 2026
+first does not lose enquiries needed for a later 2025 collection. Extending a
+cutoff, compaction/replacement, or **Rescan folders** may require rereading the
+mailbox; known records are still deduplicated. Thunderbird's mailbox must be read
+to discover new mail, even when there are no changes.
+
+Sent and received replies for a selected lead are added even when the reply
+arrived after the selected enquiry-date range. Dated paragraphs are kept in
+**Remark** in chronological order. Repeated updates do not append the same reply
+again. These updates also refresh Last updated and the lead revision, so a browser
+edit cannot overwrite a lead that changed while the editor was open.
+
+**Rescan folders** opens the range chooser and retries old mail after settings or
+parser changes. Collection runs in the background. Folder errors, unparsed
+subjects/reasons (up to 100 per run) and unmatched reply counts are shown. A saved
+button is created/updated only after a run finishes without folder errors; leads
+already read before a folder error remain saved and will be deduplicated on retry.
 
 ### Extraction rules and limits
 
@@ -144,11 +181,11 @@ time depends on mailbox size and disk speed.
 
 ## Daily workflow
 
-1. **Collect from mail** and review any extraction notice.
+1. Open a saved year/range, or **Collect from mail** and choose what to update. Review any extraction notice.
 2. Search/filter the compact table. Use **Columns** to choose what stays visible;
-   drag a header's right edge to resize it. Column selection is saved in this browser.
+   drag a header's right edge to resize it. Column selection is saved in this browser. Date newest-to-oldest is the default; use **Sort leads** for oldest first or name/Call ID A–Z/Z–A. The footer shows matching totals and pages; use **Go to page** or the arrows.
 3. Click a customer to edit their details and sales fields. Save only your changes.
-4. Use **Activity** for call/conversation notes and email history.
+4. Use **Activity** for call/conversation notes and email history. **Remark · saved conversation** in Details shows the combined Remark, also used by cards and reports.
 5. Use **Follow-ups** to schedule a date/time and a reminder note. Scheduling can
    bring the lead's next-follow-up date forward. Completing it advances that date
    to the next remaining reminder when it corresponds to the completed reminder.
@@ -193,13 +230,24 @@ customer records are **not** imported automatically.
 The report preserves the established column order, labels, widths, table styling
 and date format: Dealer, Call ID, Enq Date, Customer Name, ContactNo, Email Id, Model,
 Quantity, Voice of Customer, Remark, Category, Customer Responded or Not, Relevance,
-Temperature, Win, Lost and Status. Current notes and received/sent email activity
+Hot / Cold / Warm Deals, Win, Lost and Status. Current notes and received/sent email activity
 are included in Remark. Text beginning with `=` remains literal text rather than
 an executable Excel formula. Empty reports remain valid workbooks.
 
-The cutoff filters the **enquiry date**, inclusively. Reports are sharing files;
+When a saved collection is selected, reports begin at its start date and stop at the earlier of its saved end or your report cutoff. With All selected, the report includes all saved leads through the cutoff. The cutoff filters the **enquiry date**, inclusively. Reports are sharing files;
 reminders, complete timeline metadata, email checkpoints and undo history stay in
 the database. The report is downloaded; email delivery is handled by you.
+
+### Column meanings
+
+- **Voice of Customer:** the original requirement provided in the enquiry email.
+- **Remark:** your editable sales remark, followed by dated sent/received replies
+  and saved conversation notes in separate paragraphs. The original requirement
+  stays separate, so an update does not overwrite it.
+- **Category:** the Hot/Warm/Cold category supplied by the enquiry sender.
+- **Hot / Cold / Warm Deals:** your assessment after speaking to the customer:
+  **Hot** means buying soon, **Warm** within two months, **Cold** more than two
+  months through six months. These are separate from the sender's Category.
 
 ## Storage, backups and recovery
 
@@ -209,7 +257,7 @@ The default Windows database remains:
 %LOCALAPPDATA%\Muneer Lead CRM\lead_crm.db
 ```
 
-Existing CRM records are retained. New tables add undo snapshots and reminders,
+Existing CRM records are retained. New tables add saved collections, undo snapshots and reminders,
 and a revision column protects browser edits. The web server backs up an old
 schema before migrating it. Use one application at a time when working on this
 shared database; keep the legacy desktop app closed during web use.

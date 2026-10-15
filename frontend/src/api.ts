@@ -24,9 +24,14 @@ export async function api<T>(
   }
   return response.json();
 }
-export async function downloadReport(through: string) {
+export async function downloadReport(
+  through: string,
+  collectionId: number | null = null,
+) {
   const response = await fetch(
-    "/api/report?through=" + encodeURIComponent(through),
+    "/api/report?through=" +
+      encodeURIComponent(through) +
+      (collectionId ? `&collection_id=${collectionId}` : ""),
   );
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));

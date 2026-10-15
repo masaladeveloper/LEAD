@@ -145,6 +145,11 @@ class LeadDatabase:
                 completed_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_reminder_due ON reminders(completed_at, due_at);
+            CREATE TABLE IF NOT EXISTS collections (
+                id INTEGER PRIMARY KEY, scope_key TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+                year INTEGER, from_date TEXT NOT NULL, to_date TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
         ''')
         columns = {row[1] for row in self.connection.execute('PRAGMA table_info(leads)')}
         if 'revision' not in columns:
@@ -262,7 +267,7 @@ class LeadDatabase:
         row = self.connection.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone()
         return dict(row) if row else None
 
-    def search(self, term='', limit=10000, status='All leads', offset=0):
+    def _lead_where(self, term='', status='All leads', from_date='', to_date=''):
         clauses, params = [], []
         if term.strip():
             fields = (*SOURCE_COLUMNS, *CRM_COLUMNS)
@@ -278,19 +283,57 @@ class LeadDatabase:
         elif status in STATUSES:
             clauses.append('status = ?')
             params.append(status)
-        where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
-        rows = self.connection.execute('SELECT * FROM leads' + where + ' ORDER BY enquiry_date DESC, id DESC LIMIT ? OFFSET ?', [*params, limit, offset]).fetchall()
+        for value, operator in ((from_date, '>='), (to_date, '<=')):
+            if value:
+                clauses.append(f'enquiry_date {operator} ?')
+                params.append(as_iso_date(value))
+        return (' WHERE ' + ' AND '.join(clauses) if clauses else ''), params
+
+    def search(self, term='', limit=10000, status='All leads', offset=0, *, from_date='', to_date='', sort='latest'):
+        orders = {'latest':'enquiry_date DESC, id DESC', 'oldest':'enquiry_date ASC, id ASC',
+                  'name_asc':'customer_name COLLATE NOCASE ASC, enquiry_date DESC, id DESC',
+                  'name_desc':'customer_name COLLATE NOCASE DESC, enquiry_date DESC, id DESC',
+                  'call_id_asc':'lead_id COLLATE NOCASE ASC, id ASC',
+                  'call_id_desc':'lead_id COLLATE NOCASE DESC, id DESC'}
+        if sort not in orders:
+            raise ValueError('Choose a valid sort order.')
+        where, params = self._lead_where(term, status, from_date, to_date)
+        rows = self.connection.execute('SELECT * FROM leads' + where + ' ORDER BY ' + orders[sort] + ' LIMIT ? OFFSET ?', [*params, limit, offset]).fetchall()
         return [dict(row) for row in rows]
+
+    def count_leads(self, term='', status='All leads', from_date='', to_date=''):
+        where, params = self._lead_where(term, status, from_date, to_date)
+        return self.connection.execute('SELECT COUNT(*) FROM leads' + where, params).fetchone()[0]
+
+    def collections(self):
+        return [self._collection_result(dict(row)) for row in self.connection.execute('SELECT * FROM collections ORDER BY from_date DESC, id DESC')]
+
+    def _collection_result(self, row):
+        if row:
+            row['total'] = self.count_leads(from_date=row['from_date'], to_date=row['to_date'])
+        return row
+
+    def collection(self, collection_id):
+        row = self.connection.execute('SELECT * FROM collections WHERE id = ?', (collection_id,)).fetchone()
+        return self._collection_result(dict(row)) if row else None
+
+    def save_collection(self, scope_key, label, year, from_date, to_date):
+        with self.transaction():
+            self.connection.execute("""INSERT INTO collections (scope_key,label,year,from_date,to_date) VALUES (?,?,?,?,?)
+                ON CONFLICT(scope_key) DO UPDATE SET to_date=excluded.to_date, updated_at=CURRENT_TIMESTAMP""",
+                (scope_key, label, year, from_date, to_date))
+        return self._collection_result(dict(self.connection.execute('SELECT * FROM collections WHERE scope_key = ?', (scope_key,)).fetchone()))
 
     def all_leads(self, from_date='', to_date=''):
         rows = self.connection.execute('SELECT * FROM leads ORDER BY enquiry_date ASC, id ASC').fetchall()
         return [dict(r) for r in rows if (not from_date or (r['enquiry_date'] or '') >= from_date) and (not to_date or (r['enquiry_date'] or '') <= to_date)]
 
-    def counts(self):
+    def counts(self, from_date='', to_date=''):
+        where, params = self._lead_where(from_date=from_date, to_date=to_date)
         row = self.connection.execute("""SELECT COUNT(*) AS total,
             COALESCE(SUM(status NOT IN ('Won','Lost','Closed')),0) AS open_count,
             COALESCE(SUM(follow_up_date <> '' AND follow_up_date <= date('now','localtime') AND status NOT IN ('Won','Lost','Closed')),0) AS due,
-            COALESCE(SUM(status = 'Won'),0) AS won FROM leads""").fetchone()
+            COALESCE(SUM(status = 'Won'),0) AS won FROM leads""" + where, params).fetchone()
         return dict(row)
 
     def get_setting(self, key, default=''):
@@ -339,6 +382,8 @@ class LeadDatabase:
             cursor = self.connection.execute('''INSERT INTO activities (lead_id,kind,body,sender,occurred_at,message_id)
                 VALUES (?,?,?,?,COALESCE(NULLIF(?,''),CURRENT_TIMESTAMP),?)
                 ON CONFLICT(message_id) DO NOTHING''', (lead_id, kind, body.strip(), sender, occurred_at, message_id))
+            if cursor.rowcount > 0:
+                self.connection.execute('UPDATE leads SET revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (lead_id,))
             return cursor.rowcount > 0
 
     def activities(self, lead_id):
