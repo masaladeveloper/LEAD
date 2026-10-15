@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openpyxl import load_workbook
-from crm_database import CRM_COLUMNS, STATUSES
+from crm_database import CRM_COLUMNS, STATUSES, normalise_phone
 
 HEADERS = {
     'dealer':'dealer', 'call id':'lead_id', 'lead id':'lead_id', 'enq date':'enquiry_date', 'date':'enquiry_date',
@@ -45,7 +45,7 @@ def import_workbook(database, path):
                 continue
             if not str(record.get('customer_name') or '').strip():
                 raise ValueError(f'Row {number}: customer name is required.')
-            if not str(record.get('lead_id') or '').strip() and not (record.get('contact_no') and record.get('enquiry_date')):
+            if not str(record.get('lead_id') or '').strip() and not (normalise_phone(record.get('contact_no')) and str(record.get('enquiry_date') or '').strip()):
                 raise ValueError(f'Row {number}: provide a Call ID, or both phone and enquiry date, to prevent duplicates.')
             win, lost = marked(record.pop('win', None)), marked(record.pop('lost', None))
             if win and lost:
