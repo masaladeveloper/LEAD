@@ -143,6 +143,11 @@ The output is `dist\Muneer Lead CRM.exe`. The build script uses the single
 out of source control; old checked-in builds and duplicate specs were removed.
 Windows executables must be built on Windows, including through Actions.
 
+The executable bundles Python, Qt and the Excel/mail libraries so it runs without
+installing Python. A size of several tens of MB is normal. Packaging omits unused
+PDF rendering, virtual-keyboard plugins, Qt translations and optional XML helpers;
+the app's screens, file dialogs, email sync and Excel workflows remain included.
+
 ## Tests and structure
 
 ```powershell

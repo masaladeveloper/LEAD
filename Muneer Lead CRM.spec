@@ -1,21 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
-
-datas, binaries, hiddenimports = collect_all('openpyxl')
 
 a = Analysis(
     ['lead_crm_app.py'],
     pathex=[],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
-    hookspath=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
+    hookspath=['packaging'],
     hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
+    runtime_hooks=['packaging/smoke_workflows.py'],
+    # Only etree is used by BeautifulSoup/openpyxl; these optional helpers are unused.
+    excludes=['lxml.objectify', 'lxml.isoschematron', 'lxml.html', 'lxml.sax', 'lxml.builder'],
     noarchive=False,
     optimize=0,
 )
+# The app does not load Qt translation catalogs; its interface is English.
+a.datas = [entry for entry in a.datas if not entry[0].endswith('.qm')]
 pyz = PYZ(a.pure)
 
 exe = EXE(
