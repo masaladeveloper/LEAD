@@ -230,6 +230,9 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
                 database.connection.execute('UPDATE email_messages SET content_hash=? WHERE message_id=?', (content_hash, message_id))
                 if changed:
                     database.connection.execute('UPDATE leads SET revision=revision+1, updated_at=CURRENT_TIMESTAMP WHERE id=?', (parent['id'],))
+                    activity = database.connection.execute("SELECT id FROM activities WHERE message_id=? AND kind='received'", (message_id,)).fetchone()
+                    if activity:
+                        database.request_reply_review(activity['id'])
                     result.remarks_added += 1
                 continue
             payload = json.dumps(dict(references=references, call_id=call_id, body=body, sender=mail.sender, date=_occurred_at(mail.date)))

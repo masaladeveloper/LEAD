@@ -1,14 +1,14 @@
 """Exports share the CRM master and include email activity in the Remark column."""
 from crm_database import as_iso_date
 from report_generator import generate_weekly_report
+from thread_parser import clean_update
 
 
 def lead_remarks(database, lead):
-    """Use the same dated paragraphs for the app, cards and the Excel Remark column."""
-    events = [f"{a['occurred_at']} · {a['kind'].title()}" +
-              (f" · {a['sender']}" if a['sender'] else '') + f"\n{a['body']}"
+    """Share only manual remarks and useful outgoing replies on every surface."""
+    events = [clean_update(a['body'])
               for a in reversed(database.activities(lead['id']))
-              if a['kind'] in ('sent', 'received', 'email', 'note')]
+              if a['kind'] == 'sent']
     return '\n\n'.join(filter(None, [lead.get('remark'), *events]))
 
 

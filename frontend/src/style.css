@@ -1255,3 +1255,188 @@ td {
     gap: 10px;
   }
 }
+
+/* Compact PC workspace: keep status messages out of the enquiry viewport. */
+.workspace-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 80;
+  max-width: min(620px, calc(100vw - 40px));
+  box-shadow: 0 5px 24px #17344725;
+  gap: 16px;
+}
+.reply-panel {
+  display: grid;
+  gap: 12px;
+}
+.reply-request {
+  padding: 18px;
+  border: 1px solid #dce5eb;
+  border-radius: 9px;
+  background: white;
+}
+.reply-request header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.reply-request small {
+  display: block;
+  margin-top: 5px;
+  color: #748898;
+}
+.reply-request p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  max-height: 220px;
+  overflow: auto;
+}
+.preference-panel .field {
+  margin: 12px 0;
+}
+.preference-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.collection-bar select {
+  width: 120px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.collection-bar .expand-button {
+  margin-left: auto;
+}
+.collection-result > div {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.collection-result {
+  margin: 16px;
+}
+.table-scroll table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.table-scroll thead {
+  position: static;
+}
+.table-scroll th {
+  position: sticky;
+  top: 0;
+  background: #f7f9fb;
+  z-index: 3;
+}
+.table-scroll .pinned-customer {
+  position: sticky;
+  left: 0;
+  background: white;
+  z-index: 2;
+  box-shadow: 1px 0 #dce5eb;
+}
+.table-scroll th.pinned-customer {
+  background: #f7f9fb;
+  z-index: 5;
+}
+.table-scroll th.row-actions {
+  z-index: 4;
+}
+.table-scroll tbody tr:hover .pinned-customer {
+  background: #f1f7f8;
+}
+@media (min-width: 761px) {
+  .sidebar {
+    width: 164px;
+    padding: 18px 10px;
+  }
+  .brand {
+    margin-bottom: 28px;
+    font-size: 20px;
+    gap: 7px;
+  }
+  .app > main {
+    margin-left: 164px;
+  }
+  .topbar {
+    height: 36px;
+    padding: 0 14px;
+  }
+  .content {
+    padding: 16px;
+  }
+  .leads-content {
+    height: calc(100dvh - 36px);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+  }
+  .leads-content > :not(.table-panel) {
+    flex-shrink: 0;
+  }
+  .leads-content .page-heading {
+    margin-bottom: 8px;
+    min-height: 34px;
+  }
+  .leads-content .page-heading h1 {
+    font-size: 22px;
+  }
+  .leads-content .collection-bar {
+    margin-bottom: 6px;
+    gap: 6px;
+    padding: 0;
+  }
+  .leads-content .summary-strip {
+    padding: 5px 0;
+    margin-bottom: 6px;
+    gap: 20px;
+  }
+  .leads-content .summary-strip b {
+    font-size: 14px;
+  }
+  .leads-content .table-panel {
+    flex: 1;
+    min-height: 150px;
+    display: flex;
+    flex-direction: column;
+  }
+  .leads-content .table-scroll {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+  }
+  .leads-content .table-tools {
+    padding: 7px 10px;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .leads-content .table-footer {
+    padding: 6px 10px;
+    flex-shrink: 0;
+  }
+  .table-scroll td {
+    height: 32px;
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+  .table-scroll th {
+    height: 32px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+  .expanded .sidebar,
+  .expanded .topbar,
+  .expanded .page-heading,
+  .expanded .summary-strip {
+    display: none;
+  }
+  .expanded > main {
+    margin-left: 0;
+  }
+  .expanded .leads-content {
+    height: 100dvh;
+    padding: 8px;
+  }
+}

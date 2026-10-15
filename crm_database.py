@@ -124,6 +124,10 @@ class LeadDatabase:
                 occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, message_id TEXT UNIQUE
             );
             CREATE INDEX IF NOT EXISTS idx_activity_lead ON activities(lead_id, occurred_at);
+            CREATE TABLE IF NOT EXISTS reply_requests (
+                id INTEGER PRIMARY KEY, activity_id INTEGER NOT NULL UNIQUE REFERENCES activities(id),
+                reviewed_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS field_overrides (
                 lead_id INTEGER NOT NULL REFERENCES leads(id), field TEXT NOT NULL,
                 PRIMARY KEY(lead_id, field)
@@ -384,7 +388,25 @@ class LeadDatabase:
                 ON CONFLICT(message_id) DO NOTHING''', (lead_id, kind, body.strip(), sender, occurred_at, message_id))
             if cursor.rowcount > 0:
                 self.connection.execute('UPDATE leads SET revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (lead_id,))
+                if kind == 'received':
+                    self.request_reply_review(cursor.lastrowid)
             return cursor.rowcount > 0
+
+    def request_reply_review(self, activity_id):
+        with self.transaction():
+            self.connection.execute('''INSERT INTO reply_requests (activity_id) VALUES (?)
+                ON CONFLICT(activity_id) DO UPDATE SET reviewed_at='', created_at=CURRENT_TIMESTAMP''', (activity_id,))
+
+    def reply_requests(self):
+        return [dict(row) for row in self.connection.execute('''
+            SELECT r.*, a.lead_id, a.body, a.sender, a.occurred_at,
+                   l.customer_name, l.contact_no, l.lead_id AS call_id, l.enquiry_date
+            FROM reply_requests r JOIN activities a ON a.id=r.activity_id JOIN leads l ON l.id=a.lead_id
+            WHERE r.reviewed_at='' ORDER BY r.created_at DESC, r.id DESC''')]
+
+    def review_reply(self, request_id):
+        with self.transaction():
+            return self.connection.execute('UPDATE reply_requests SET reviewed_at=CURRENT_TIMESTAMP WHERE id=?', (request_id,)).rowcount > 0
 
     def activities(self, lead_id):
         return [dict(r) for r in self.connection.execute('SELECT * FROM activities WHERE lead_id = ? ORDER BY occurred_at DESC, id DESC', (lead_id,))]

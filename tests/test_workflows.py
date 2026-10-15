@@ -151,13 +151,14 @@ class Workflows(unittest.TestCase):
     def test_export_range_activity_and_literal_formulas(self):
         lead_id, _ = self.database.upsert_source_lead({'lead_id':'101','customer_name':'=1+1','enquiry_date':'2026-10-14'})
         self.database.add_activity(lead_id, 'received', 'Please send a quote', 'buyer@example.test')
+        self.database.add_activity(lead_id, 'sent', 'Dear Sir,\nQuotation sent.\nRegards,\nSales', 'sales@example.test')
         self.database.upsert_source_lead({'lead_id':'102','customer_name':'Older','enquiry_date':'2026-09-01'})
         path = self.root / 'reports' / 'weekly.xlsx'
         self.assertEqual(export_report(self.database, path, '2026-10-01','2026-10-31'), 1)
         book = load_workbook(path)
         self.assertEqual(book.active.max_column, 17)
         self.assertEqual(book.active['D2'].data_type, 's')
-        self.assertIn('Please send a quote', book.active['J2'].value)
+        self.assertEqual(book.active['J2'].value, 'Quotation sent.')
         book.close()
 
     def test_status_controls_outcome_and_open_counts(self):

@@ -18,6 +18,9 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   X,
+  Maximize2,
+  Minimize2,
+  Mail,
 } from "lucide-react";
 import { api, downloadReport, initialize } from "./api";
 import { cardBlob, renderCard } from "./card";
@@ -30,10 +33,12 @@ import type {
   Settings,
   Collection,
   CollectionRequest,
+  Preferences,
+  ReplyRequest,
 } from "./types";
 import "./style.css";
 
-type View = "leads" | "followups" | "reports" | "settings";
+type View = "leads" | "followups" | "replies" | "reports" | "settings";
 const localToday = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -174,18 +179,38 @@ export default function App() {
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
   const [collections, setCollections] = useState<Collection[]>([]);
-  const [collectionId, setCollectionId] = useState<number | null>(() => {
-    const saved = Number(localStorage.getItem("lead-active-collection"));
-    return Number.isInteger(saved) && saved > 0 ? saved : null;
+  const [collectionId, setCollectionId] = useState<number | null>(null);
+  const [viewYear, setViewYear] = useState<number | null>(
+    new Date().getFullYear(),
+  );
+  const [preferences, setPreferences] = useState<Preferences>({
+    default_enquiry_year: "current",
+    resolved_year: new Date().getFullYear(),
+    auto_check_mail: true,
   });
+  const [expanded, setExpanded] = useState(false);
+  const [resultsOpen, setResultsOpen] = useState(false);
+  const [replyRequests, setReplyRequests] = useState<ReplyRequest[]>([]);
+  const previousRequests = useRef<Set<number> | null>(null);
+  const scopeQuery = collectionId
+    ? `&collection_id=${collectionId}`
+    : viewYear
+      ? `&year=${viewYear}`
+      : "&all_years=true";
   const [collectionDialog, setCollectionDialog] = useState(false);
   const [rescanCollection, setRescanCollection] = useState(false);
   const [startingCollection, setStartingCollection] = useState(false);
   const [sort, setSort] = useState("latest");
   const [pagination, setPagination] = useState({ total: 0, pages: 1 });
   const selectedCollection =
-    collections.find((c) => c.id === collectionId) ?? null;
-  const [dismissedCollection, setDismissedCollection] = useState("");
+    collections.find((c) =>
+      collectionId ? c.id === collectionId : c.year === viewYear,
+    ) ?? null;
+  const scopeLabel = viewYear
+    ? `${viewYear} enquiries`
+    : selectedCollection
+      ? `${selectedCollection.label} enquiries`
+      : "All enquiries";
   const [view, setView] = useState<View>("leads"),
     [q, setQ] = useState(""),
     [status, setStatus] = useState("All leads"),
@@ -246,12 +271,14 @@ export default function App() {
   const touch = () => setRefresh((n) => n + 1);
   useEffect(() => {
     initialize()
-      .then(() => setReady(true))
+      .then(() => api<Preferences>("/preferences"))
+      .then((prefs) => {
+        setPreferences(prefs);
+        setViewYear(prefs.resolved_year);
+        setReady(true);
+      })
       .catch((e) => setError(e.message));
   }, []);
-  useEffect(() => {
-    localStorage.setItem("lead-active-collection", String(collectionId ?? ""));
-  }, [collectionId]);
   useEffect(() => {
     if (!ready) return;
     api<Collection[]>("/collections")
@@ -277,7 +304,7 @@ export default function App() {
           page: number;
           counts: Record<string, number>;
         }>(
-          `/leads?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&page=${page}&sort=${sort}${collectionId ? `&collection_id=${collectionId}` : ""}`,
+          `/leads?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&page=${page}&sort=${sort}${scopeQuery}`,
         )
           .then((data) => {
             if (id !== sequence.current) return;
@@ -296,13 +323,43 @@ export default function App() {
       q ? 220 : 0,
     );
     return () => clearTimeout(timer);
-  }, [ready, q, status, page, refresh, sort, collectionId]);
+  }, [ready, q, status, page, refresh, sort, collectionId, viewYear]);
   useEffect(() => {
     if (!ready) return;
     api<Reminder[]>("/reminders")
       .then(setReminders)
       .catch((e) => setError(e.message));
   }, [ready, refresh, notificationTick]);
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    api<ReplyRequest[]>("/reply-requests")
+      .then((requests) => {
+        if (cancelled) return;
+        const ids = new Set(requests.map((r) => r.id));
+        if (
+          previousRequests.current &&
+          requests.some((r) => !previousRequests.current!.has(r.id))
+        ) {
+          setNotice(
+            "New reply received. Open Reply requests to review and update the enquiry.",
+          );
+        }
+        previousRequests.current = ids;
+        setReplyRequests(requests);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, refresh, notificationTick]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 6000);
+    return () => clearTimeout(timer);
+  }, [notice]);
   useEffect(() => {
     if (!ready) return;
     const poll = () =>
@@ -312,14 +369,16 @@ export default function App() {
           if (data.finished_at && data.finished_at !== lastFinished.current) {
             const initialPoll = lastFinished.current === null;
             lastFinished.current = data.finished_at;
-            if (data.collection && !initialPoll) {
-              setCollectionId(data.collection.id);
+            if (data.collection && !initialPoll && !data.automatic) {
+              setCollectionId(data.collection.year ? null : data.collection.id);
+              setViewYear(data.collection.year);
               setPage(1);
               setQ("");
               setStatus("All leads");
               setSort("latest");
               setView("leads");
             }
+            if (!data.automatic && !initialPoll) setResultsOpen(true);
             touch();
           } else if (lastFinished.current === null) {
             lastFinished.current = data.finished_at;
@@ -373,8 +432,9 @@ export default function App() {
       setStartingCollection(false);
     }
   }
-  function chooseCollection(id: number | null) {
+  function chooseCollection(id: number | null, year: number | null = null) {
     setCollectionId(id);
+    setViewYear(year);
     setPage(1);
     setQ("");
     setStatus("All leads");
@@ -385,7 +445,7 @@ export default function App() {
     setReportBusy(true);
     setError("");
     try {
-      await downloadReport(through, collectionId);
+      await downloadReport(through, scopeQuery);
       setNotice("Your Excel report is ready.");
     } catch (e) {
       setError((e as Error).message);
@@ -421,7 +481,7 @@ export default function App() {
     window.addEventListener("pointercancel", stop);
   };
   return (
-    <div className="app">
+    <div className={"app " + (expanded && view === "leads" ? "expanded" : "")}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-symbol">m</span>
@@ -432,7 +492,8 @@ export default function App() {
         <div className="nav-heading">WORKSPACE</div>
         {(
           [
-            ["leads", "All leads", List],
+            ["leads", "Enquiries", List],
+            ["replies", "Reply requests", Mail],
             ["followups", "Follow-ups", Bell],
             ["reports", "Reports", FileSpreadsheet],
             ["settings", "Settings", SettingsIcon],
@@ -446,6 +507,9 @@ export default function App() {
             <Icon size={17} />
             {title}
             {key === "followups" && due.length > 0 && <b>{due.length}</b>}
+            {key === "replies" && replyRequests.length > 0 && (
+              <b>{replyRequests.length}</b>
+            )}
           </button>
         ))}
         <div className="sidebar-bottom">
@@ -459,6 +523,17 @@ export default function App() {
         <header className="topbar">
           <span>Muneer Heavy Earthmoving Equipment</span>
           <div>
+            {(job.result || job.error) && (
+              <button
+                className="results-button"
+                onClick={() => setResultsOpen(true)}
+              >
+                Collection results
+                {job.error || job.result?.errors.length || job.result?.unparsed
+                  ? " · needs attention"
+                  : ""}
+              </button>
+            )}
             <span className="local-dot" />
             Local workspace
             <button
@@ -476,21 +551,25 @@ export default function App() {
               <span className="eyebrow">SALES WORKSPACE</span>
               <h1>
                 {view === "leads"
-                  ? "Your leads, in one place"
-                  : view === "followups"
-                    ? "Keep the conversation moving"
-                    : view === "reports"
-                      ? "Your master, ready to send"
-                      : "Connect your Thunderbird"}
+                  ? scopeLabel
+                  : view === "replies"
+                    ? "Replies needing your update"
+                    : view === "followups"
+                      ? "Keep the conversation moving"
+                      : view === "reports"
+                        ? "Your master, ready to send"
+                        : "Connect your Thunderbird"}
               </h1>
               <p>
                 {view === "leads"
                   ? "Collect enquiries. Review the details. Make the next move."
-                  : view === "followups"
-                    ? "Upcoming conversations and overdue follow-ups."
-                    : view === "reports"
-                      ? "Download the complete lead history through your chosen date."
-                      : "Read downloaded mail directly from the folders on this PC."}
+                  : view === "replies"
+                    ? "Incoming mail for your enquiries, including saved previous years."
+                    : view === "followups"
+                      ? "Upcoming conversations and overdue follow-ups."
+                      : view === "reports"
+                        ? "Download the complete lead history through your chosen date."
+                        : "Read downloaded mail directly from the folders on this PC."}
               </p>
             </div>
             <div className="actions">
@@ -517,34 +596,82 @@ export default function App() {
               </button>
             </div>
           </div>
-          {view === "leads" && collections.length > 0 && (
+          {view === "leads" && (
             <div className="collection-bar">
-              <span>Saved leads</span>
+              <span>Enquiry year</span>
+              {[
+                ...new Set([
+                  preferences.resolved_year,
+                  new Date().getFullYear(),
+                  ...collections.filter((c) => c.year).map((c) => c.year!),
+                ]),
+              ]
+                .sort((a, b) => b - a)
+                .map((year) => (
+                  <button
+                    key={year}
+                    className={viewYear === year ? "selected" : ""}
+                    onClick={() => chooseCollection(null, year)}
+                  >
+                    {year}
+                    {year === preferences.resolved_year && (
+                      <small>default</small>
+                    )}
+                  </button>
+                ))}
+              <select
+                aria-label="View enquiry year"
+                value={viewYear ?? ""}
+                onChange={(e) => chooseCollection(null, Number(e.target.value))}
+              >
+                <option value="" disabled>
+                  Choose year
+                </option>
+                {Array.from(
+                  { length: new Date().getFullYear() - 1899 },
+                  (_, i) => new Date().getFullYear() - i,
+                ).map((year) => (
+                  <option key={year}>{year}</option>
+                ))}
+              </select>
+              {collections
+                .filter((c) => !c.year)
+                .map((c) => (
+                  <button
+                    key={c.id}
+                    className={collectionId === c.id ? "selected" : ""}
+                    onClick={() => chooseCollection(c.id)}
+                  >
+                    {c.label} <small>{c.total}</small>
+                  </button>
+                ))}
               <button
-                className={!collectionId ? "selected" : ""}
+                className={!collectionId && !viewYear ? "selected" : ""}
                 onClick={() => chooseCollection(null)}
               >
-                All
+                All years
               </button>
-              {collections.map((c) => (
+              <button
+                className="expand-button"
+                onClick={() => setExpanded(!expanded)}
+              >
+                {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}{" "}
+                {expanded ? "Exit expanded view" : "Expand enquiries"}
+              </button>
+              {expanded && (
                 <button
-                  key={c.id}
-                  className={collectionId === c.id ? "selected" : ""}
-                  title={`${c.from_date} to ${c.to_date} · Last collected ${time(c.updated_at)}`}
-                  onClick={() => chooseCollection(c.id)}
+                  onClick={() => {
+                    setExpanded(false);
+                    navigate("replies");
+                  }}
                 >
-                  {c.label} <small>{c.total}</small>
+                  Replies ({replyRequests.length})
                 </button>
-              ))}
-              {selectedCollection && (
-                <small className="collection-dates">
-                  {selectedCollection.from_date} → {selectedCollection.to_date}
-                </small>
               )}
             </div>
           )}
           {error && (
-            <div role="alert" className="banner error">
+            <div role="alert" className="banner error workspace-toast">
               <span>{error}</span>
               <button
                 className="icon"
@@ -556,59 +683,10 @@ export default function App() {
             </div>
           )}
           {notice && (
-            <div role="status" className="banner success">
+            <div role="status" className="banner success workspace-toast">
               {notice}
             </div>
           )}
-          {(job.result || job.error) &&
-            job.finished_at !== dismissedCollection && (
-              <div
-                className={
-                  "collection-result " +
-                  (job.error || job.result?.errors.length ? "issue" : "")
-                }
-              >
-                <div>
-                  <strong>
-                    {job.error
-                      ? "Collection needs attention"
-                      : `${job.result!.new_leads} new leads · ${job.result!.updated_leads} changed leads · ${job.result!.remarks_added} remark updates`}
-                  </strong>
-                  <span>
-                    {job.error ||
-                      job.result?.errors.join(" · ") ||
-                      ` ${job.result!.unparsed} unparsed · ${job.result!.out_of_range} outside range · ${job.result!.pending} unmatched replies`}
-                  </span>
-                </div>
-                <button
-                  className="icon collection-dismiss"
-                  aria-label="Dismiss collection result"
-                  onClick={() => setDismissedCollection(job.finished_at)}
-                >
-                  <X size={14} />
-                </button>
-                {!!job.result?.issues.length && (
-                  <details>
-                    <summary>
-                      Review unparsed enquiries ({job.result.issues.length})
-                    </summary>
-                    {job.result.issues.map((issue, i) => (
-                      <p key={i}>
-                        <b>
-                          {issue.folder} · {issue.subject}
-                        </b>
-                        <br />
-                        {issue.reason}
-                      </p>
-                    ))}
-                    <small>
-                      After correcting the template/settings, use Rescan in
-                      Settings to retry them.
-                    </small>
-                  </details>
-                )}
-              </div>
-            )}
           {!ready && !error && (
             <div className="empty">Connecting to your local workspace…</div>
           )}
@@ -744,7 +822,12 @@ export default function App() {
                     <thead>
                       <tr>
                         {columns.map((key) => (
-                          <th key={key}>
+                          <th
+                            key={key}
+                            className={
+                              key === "customer_name" ? "pinned-customer" : ""
+                            }
+                          >
                             {tableFields[key]}
                             <span
                               className="resize"
@@ -752,7 +835,7 @@ export default function App() {
                             />
                           </th>
                         ))}
-                        <th>Actions</th>
+                        <th className="row-actions">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -761,6 +844,9 @@ export default function App() {
                           {columns.map((key) => (
                             <td
                               key={key}
+                              className={
+                                key === "customer_name" ? "pinned-customer" : ""
+                              }
                               title={display(
                                 key === "remark"
                                   ? lead.remark_preview
@@ -888,6 +974,62 @@ export default function App() {
               </section>
             </>
           )}
+          {view === "replies" && (
+            <section className="reply-panel">
+              {!replyRequests.length && (
+                <div className="empty">
+                  <Mail size={32} />
+                  <h3>No replies awaiting review</h3>
+                  <p>
+                    New matched incoming replies appear here after a mailbox
+                    check.
+                  </p>
+                </div>
+              )}
+              {replyRequests.map((request) => (
+                <article className="reply-request" key={request.id}>
+                  <header>
+                    <div>
+                      <strong>
+                        Request received · {request.customer_name}
+                      </strong>
+                      <small>
+                        Call ID {request.call_id || "—"} ·{" "}
+                        {request.enquiry_date} · {request.sender} ·{" "}
+                        {time(request.occurred_at)}
+                      </small>
+                    </div>
+                    <span className="badge">Needs update</span>
+                  </header>
+                  <p>{request.body}</p>
+                  <div className="actions">
+                    <button
+                      className="primary"
+                      onClick={() => openLead(request.lead_id)}
+                    >
+                      Open enquiry / update
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await api(
+                            `/reply-requests/${request.id}/review`,
+                            "POST",
+                          );
+                          touch();
+                          setNotice("Reply marked reviewed.");
+                        } catch (e) {
+                          setError((e as Error).message);
+                        }
+                      }}
+                    >
+                      Mark reviewed
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </section>
+          )}
           {view === "followups" && (
             <Followups
               reminders={reminders}
@@ -905,8 +1047,10 @@ export default function App() {
               <p>
                 {selectedCollection
                   ? `Leads in ${selectedCollection.label}, from ${selectedCollection.from_date} through the cutoff date.`
-                  : "Every saved lead from the beginning through the cutoff date."}{" "}
-                Includes your sales updates and dated remarks.
+                  : viewYear
+                    ? `Enquiries from ${viewYear}, through the cutoff date.`
+                    : "Every saved lead from the beginning through the cutoff date."}{" "}
+                Includes your manual remarks and outgoing email updates.
               </p>
               <label className="field">
                 Include enquiries through
@@ -937,7 +1081,8 @@ export default function App() {
                 Win/Lost fields
                 <br />
                 <Check size={16} />
-                Email activity and your sales notes in the Remark column
+                Your outgoing updates and manual Remark, without greetings or
+                signatures
               </div>
               <small>
                 The report is ready to attach to your weekly email. Use a
@@ -947,6 +1092,13 @@ export default function App() {
           )}
           {view === "settings" && ready && (
             <SettingsPage
+              preferences={preferences}
+              onPreferences={(prefs) => {
+                setPreferences(prefs);
+                chooseCollection(null, prefs.resolved_year);
+                setView("settings");
+                touch();
+              }}
               onNotice={setNotice}
               onError={setError}
               rescan={() => {
@@ -958,9 +1110,61 @@ export default function App() {
           )}
         </div>
       </main>
+      {resultsOpen && (job.result || job.error) && (
+        <Modal title="Collection results" onClose={() => setResultsOpen(false)}>
+          <div
+            className={
+              "collection-result " +
+              (job.error || job.result?.errors.length ? "issue" : "")
+            }
+          >
+            <div>
+              <strong>
+                {job.error
+                  ? "Collection needs attention"
+                  : `${job.result!.new_leads} new leads · ${job.result!.updated_leads} changed leads · ${job.result!.remarks_added} mail updates`}
+              </strong>
+              <span>
+                {job.error ||
+                  job.result?.errors.join(" · ") ||
+                  ` ${job.result!.unparsed} unparsed · ${job.result!.out_of_range} outside range · ${job.result!.pending} unmatched replies`}
+              </span>
+            </div>
+            <button
+              className="icon collection-dismiss"
+              aria-label="Dismiss collection result"
+              onClick={() => setResultsOpen(false)}
+            >
+              <X size={14} />
+            </button>
+            {!!job.result?.issues.length && (
+              <details>
+                <summary>
+                  Review unparsed enquiries ({job.result.issues.length})
+                </summary>
+                {job.result.issues.map((issue, i) => (
+                  <p key={i}>
+                    <b>
+                      {issue.folder} · {issue.subject}
+                    </b>
+                    <br />
+                    {issue.reason}
+                  </p>
+                ))}
+                <small>
+                  After correcting the template/settings, use Rescan in Settings
+                  to retry them.
+                </small>
+              </details>
+            )}
+          </div>
+        </Modal>
+      )}
+
       {collectionDialog && (
         <CollectionDialog
           selected={selectedCollection}
+          preferredYear={viewYear ?? preferences.resolved_year}
           rescan={rescanCollection}
           busy={startingCollection}
           start={collect}
@@ -988,12 +1192,14 @@ export default function App() {
 }
 
 function CollectionDialog({
+  preferredYear,
   selected,
   rescan,
   busy,
   start,
   onClose,
 }: {
+  preferredYear: number;
   selected: Collection | null;
   rescan: boolean;
   busy: boolean;
@@ -1002,9 +1208,9 @@ function CollectionDialog({
 }) {
   const currentYear = new Date().getFullYear();
   const [mode, setMode] = useState(selected ? "update" : "year");
-  const [year, setYear] = useState(selected?.year ?? currentYear);
+  const [year, setYear] = useState(selected?.year ?? preferredYear);
   const [from, setFrom] = useState(
-    selected?.from_date ?? `${currentYear}-01-01`,
+    selected?.from_date ?? `${preferredYear}-01-01`,
   );
   const [to, setTo] = useState(selected?.to_date ?? localToday());
   const [error, setError] = useState("");
@@ -1100,8 +1306,9 @@ function CollectionDialog({
             {range.from} → {range.to}
           </strong>
           <small>
-            Enquiry dates, inclusive. New sent/received replies for these leads
-            are added to Remark, even if the reply arrived later.
+            Enquiry dates, inclusive. Outgoing updates appear in Remark.
+            Incoming replies create review requests, even if they arrived after
+            these enquiry dates.
           </small>
         </div>
         {mode === "update" && (
@@ -1452,8 +1659,8 @@ function LeadDialog({
         )}
         {key === "remark" && (
           <small>
-            Your editable remark. Dated email replies and conversation notes
-            appear below and are included in the Excel Remark column.
+            Your editable remark. Cleaned outgoing replies appear below and are
+            included in Excel. Incoming mail and call notes stay in Activity.
           </small>
         )}
       </label>
@@ -1542,7 +1749,7 @@ function LeadDialog({
             </div>
             {detail && detail.remark_text && (
               <section className="remark-history">
-                <h3>Remark · saved conversation</h3>
+                <h3>Remark · outgoing updates</h3>
                 <p>{detail.remark_text}</p>
               </section>
             )}
@@ -1774,11 +1981,15 @@ function LeadDialog({
 }
 
 function SettingsPage({
+  preferences,
+  onPreferences,
   onNotice,
   onError,
   rescan,
   busy,
 }: {
+  preferences: Preferences;
+  onPreferences: (prefs: Preferences) => void;
   onNotice: (s: string) => void;
   onError: (s: string) => void;
   rescan: () => void;
@@ -1875,6 +2086,12 @@ function SettingsPage({
         </button>
       </section>
       <div>
+        <PreferencePanel
+          data={preferences}
+          saved={onPreferences}
+          notice={onNotice}
+          error={onError}
+        />
         <section className="help-panel">
           <h3>Find your mailbox files</h3>
           <ol>
@@ -1891,8 +2108,8 @@ function SettingsPage({
             <li>Use mbox storage. Maildir directories are not supported.</li>
           </ol>
           <p>
-            Collection happens when you click the button. Keep Thunderbird
-            downloading your mail.
+            Keep Thunderbird downloading mail. Automatic checks run every minute
+            while the local server is running; you can disable them below.
           </p>
         </section>
         <section className="help-panel">
@@ -2059,5 +2276,90 @@ function CardDialog({
         </div>
       </footer>
     </Modal>
+  );
+}
+
+function PreferencePanel({
+  data,
+  saved,
+  notice,
+  error,
+}: {
+  data: Preferences;
+  saved: (p: Preferences) => void;
+  notice: (s: string) => void;
+  error: (s: string) => void;
+}) {
+  const [choice, setChoice] = useState(data.default_enquiry_year);
+  const [automatic, setAutomatic] = useState(data.auto_check_mail);
+  const [busy, setBusy] = useState(false);
+  const currentYear = new Date().getFullYear();
+  return (
+    <section className="help-panel preference-panel">
+      <h3>Workspace preferences</h3>
+      <label className="field">
+        Default enquiry year
+        <select
+          aria-label="Default enquiry year"
+          value={choice === "current" ? "current" : "fixed"}
+          onChange={(e) =>
+            setChoice(
+              e.target.value === "current" ? "current" : String(currentYear),
+            )
+          }
+        >
+          <option value="current">
+            Active year (automatically changes each January)
+          </option>
+          <option value="fixed">Choose a fixed year</option>
+        </select>
+      </label>
+      {choice !== "current" && (
+        <label className="field">
+          Year
+          <input
+            aria-label="Fixed default year"
+            type="number"
+            min={1900}
+            max={currentYear}
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+          />
+        </label>
+      )}
+      <label className="preference-toggle">
+        <input
+          type="checkbox"
+          checked={automatic}
+          onChange={(e) => setAutomatic(e.target.checked)}
+        />{" "}
+        Check downloaded mail every minute
+      </label>
+      <p>
+        Every launch opens your default year. Previous years and All years are
+        available in Enquiries. Automatic checks monitor the default year and
+        saved collections for incoming replies.
+      </p>
+      <button
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            const prefs = await api<Preferences>("/preferences", "PUT", {
+              default_enquiry_year: choice,
+              auto_check_mail: automatic,
+            });
+            saved(prefs);
+            notice("Workspace preferences saved.");
+          } catch (e) {
+            error((e as Error).message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        Save preferences
+      </button>
+    </section>
   );
 }

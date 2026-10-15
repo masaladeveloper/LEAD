@@ -126,7 +126,11 @@ A **2026** button appears after collection completes successfully. Custom ranges
 get their own saved buttons. Empty successful collections are saved too.
 
 Click a saved button to open data already stored in SQLite. This makes no mail
-collection request. The last selected collection is remembered in this browser.
+collection request. Every launch opens the **active year** (for example 2026),
+even if you last viewed All years or a previous year. Under **Settings → Workspace
+preferences**, keep **Active year** to roll forward each January, or choose a
+fixed default year. Year buttons and the year selector open saved enquiries
+without collecting mail; **All years** is an explicit choice.
 Click **Collect from mail** again to choose **Update 2026**, another year, or custom
 start/end dates. Updating the current year extends its cutoff to today. Updating
 a custom range keeps its original dates; choose a new range to extend it.
@@ -139,11 +143,33 @@ cutoff, compaction/replacement, or **Rescan folders** may require rereading the
 mailbox; known records are still deduplicated. Thunderbird's mailbox must be read
 to discover new mail, even when there are no changes.
 
-Sent and received replies for a selected lead are added even when the reply
-arrived after the selected enquiry-date range. Dated paragraphs are kept in
-**Remark** in chronological order. Repeated updates do not append the same reply
-again. These updates also refresh Last updated and the lead revision, so a browser
-edit cannot overwrite a lead that changed while the editor was open.
+**Remark** contains your editable manual remark followed by your **outgoing replies
+only**, in chronological paragraphs. Greetings, signatures, quoted history and
+sender/date labels are removed from those outgoing paragraphs. Incoming messages,
+call notes and system events stay in **Activity**. Existing saved outgoing replies
+are cleaned when displayed/exported; no recollection is needed and the saved
+activity text is retained. Replies remain eligible after the enquiry-date range.
+Repeated updates do not append the same reply again. Updates refresh Last updated
+and the lead revision to protect an editor from overwriting a changed lead.
+
+### Incoming reply requests
+
+When a new incoming reply matches an enquiry, **Reply requests** shows a persistent
+**Request received / Needs update** alert with the customer, Call ID, sender, date
+and message. Open the enquiry, save the relevant sales changes, then **Mark reviewed**.
+Opening or editing an enquiry does not dismiss the request. Alerts include older
+saved leads, regardless of the table's selected year. Repeated scans create no
+duplicate alerts; a changed incoming message reopens its request. Older mail already
+saved before this feature is not backfilled into alerts.
+
+**Check downloaded mail every minute** is enabled by default in Workspace preferences.
+While the Python server is running, it checks the default year and saved collections
+for new/changed mail, without switching your selected year, search or page. It shares
+the collection worker with manual collection, so scans do not overlap. Keep Thunderbird
+downloading Inbox and Sent: the app reads local mbox files and does not contact your
+mail provider. Stop the server with **Ctrl+C** to stop checks; closing a browser tab
+alone leaves the server running. Disable automatic checks to use **Collect from mail**
+only. Unmatched replies remain pending until their parent enquiry can be matched.
 
 **Rescan folders** opens the range chooser and retries old mail after settings or
 parser changes. Collection runs in the background. Folder errors, unparsed
@@ -183,9 +209,9 @@ time depends on mailbox size and disk speed.
 
 1. Open a saved year/range, or **Collect from mail** and choose what to update. Review any extraction notice.
 2. Search/filter the compact table. Use **Columns** to choose what stays visible;
-   drag a header's right edge to resize it. Column selection is saved in this browser. Date newest-to-oldest is the default; use **Sort leads** for oldest first or name/Call ID A–Z/Z–A. The footer shows matching totals and pages; use **Go to page** or the arrows.
+   drag a header's right edge to resize it. Customer names stay pinned while scrolling sideways. **Expand enquiries** gives the table the entire window; use **Exit expanded view** to return. Column selection is saved in this browser. Date newest-to-oldest is the default; use **Sort leads** for oldest first or name/Call ID A–Z/Z–A. The footer shows matching totals and pages; use **Go to page** or the arrows.
 3. Click a customer to edit their details and sales fields. Save only your changes.
-4. Use **Activity** for call/conversation notes and email history. **Remark · saved conversation** in Details shows the combined Remark, also used by cards and reports.
+4. Use **Activity** for call/conversation notes and email history. **Remark · outgoing updates** shows the same cleaned Remark used by cards and reports. Check **Reply requests** for incoming messages needing your review.
 5. Use **Follow-ups** to schedule a date/time and a reminder note. Scheduling can
    bring the lead's next-follow-up date forward. Completing it advances that date
    to the next remaining reminder when it corresponds to the completed reminder.
@@ -230,19 +256,19 @@ customer records are **not** imported automatically.
 The report preserves the established column order, labels, widths, table styling
 and date format: Dealer, Call ID, Enq Date, Customer Name, ContactNo, Email Id, Model,
 Quantity, Voice of Customer, Remark, Category, Customer Responded or Not, Relevance,
-Hot / Cold / Warm Deals, Win, Lost and Status. Current notes and received/sent email activity
-are included in Remark. Text beginning with `=` remains literal text rather than
+Hot / Cold / Warm Deals, Win, Lost and Status. Your manual Remark and cleaned outgoing
+email updates are included in Remark. Text beginning with `=` remains literal text rather than
 an executable Excel formula. Empty reports remain valid workbooks.
 
-When a saved collection is selected, reports begin at its start date and stop at the earlier of its saved end or your report cutoff. With All selected, the report includes all saved leads through the cutoff. The cutoff filters the **enquiry date**, inclusively. Reports are sharing files;
+Reports use the selected enquiry year/range (the default year on launch) through your cutoff. For custom saved ranges, the cutoff cannot extend past the saved end. With All years selected, the report includes all saved leads through the cutoff. The cutoff filters the **enquiry date**, inclusively. Reports are sharing files;
 reminders, complete timeline metadata, email checkpoints and undo history stay in
 the database. The report is downloaded; email delivery is handled by you.
 
 ### Column meanings
 
 - **Voice of Customer:** the original requirement provided in the enquiry email.
-- **Remark:** your editable sales remark, followed by dated sent/received replies
-  and saved conversation notes in separate paragraphs. The original requirement
+- **Remark:** your editable sales remark, followed by cleaned outgoing replies
+  in separate paragraphs, without dates/sender labels. The original requirement
   stays separate, so an update does not overwrite it.
 - **Category:** the Hot/Warm/Cold category supplied by the enquiry sender.
 - **Hot / Cold / Warm Deals:** your assessment after speaking to the customer:

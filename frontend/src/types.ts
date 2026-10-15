@@ -78,7 +78,26 @@ export type CollectionRequest = {
   to_date?: string;
   rescan?: boolean;
 };
+export type Preferences = {
+  default_enquiry_year: string;
+  resolved_year: number;
+  auto_check_mail: boolean;
+};
+export type ReplyRequest = {
+  id: number;
+  activity_id: number;
+  lead_id: number;
+  customer_name: string;
+  contact_no: string;
+  call_id: string;
+  enquiry_date: string;
+  sender: string;
+  occurred_at: string;
+  body: string;
+  created_at: string;
+};
 export type Job = {
+  automatic?: boolean;
   running: boolean;
   finished_at: string;
   collection?: Collection | null;

@@ -118,7 +118,7 @@ class Web(unittest.TestCase):
             self.assertEqual(len(self.client.get('/api/leads',params={'q':term}).json()['leads']),1)
         db=LeadDatabase(self.path)
         for n in range(31):
-            db.upsert_source_lead({'lead_id':str(500+n),'customer_name':f'Buyer {n}'})
+            db.upsert_source_lead({'lead_id':str(500+n),'customer_name':f'Buyer {n}', 'enquiry_date':'2026-01-01'})
         db.close()
         self.assertTrue(self.client.get('/api/leads').json()['has_more'])
         self.assertEqual(len(self.client.get('/api/leads?page=2').json()['leads']),7)
@@ -142,7 +142,7 @@ class Web(unittest.TestCase):
         db=LeadDatabase(self.path)
         db.upsert_source_lead({'lead_id':'old','customer_name':'Older','enquiry_date':'2025-01-01'})
         db.close()
-        response=self.client.get('/api/report?through=2025-12-31')
+        response=self.client.get('/api/report?year=2025&through=2025-12-31')
         self.assertEqual(response.status_code,200)
         book=load_workbook(BytesIO(response.content))
         template=load_workbook('templates/lead-master.xlsx')
@@ -190,7 +190,7 @@ class Web(unittest.TestCase):
             connection.execute('DROP TABLE lead_history')
             connection.execute('DROP TABLE reminders')
         with TestClient(create_app(legacy)) as client:
-            self.assertEqual(client.get('/api/leads').json()['leads'][0]['customer_name'], 'Existing synthetic buyer')
+            self.assertEqual(client.get('/api/leads?all_years=true').json()['leads'][0]['customer_name'], 'Existing synthetic buyer')
         backups = list((self.root / 'backups').glob('pre-web-*.db'))
         self.assertEqual(len(backups), 1)
         with sqlite3.connect(backups[0]) as connection:
@@ -262,7 +262,7 @@ class Web(unittest.TestCase):
         self.assertEqual((unchanged['result']['new_leads'],unchanged['result']['updated_leads'],unchanged['result']['remarks_added']),(0,0,0))
         self.assertEqual(len(self.client.get('/api/collections').json()),2)
 
-    def test_updates_append_dated_remarks_only_to_selected_year(self):
+    def test_updates_keep_outgoing_remarks_and_request_incoming_review(self):
         path=self.prepare_range_mailbox()
         self.request('POST','/api/sync',{'year':2026}); saved=self.wait_for_collection()['collection']
         self.request('POST','/api/sync',{'year':2025}); old=self.wait_for_collection()['collection']
@@ -281,15 +281,18 @@ class Web(unittest.TestCase):
         self.assertEqual(detail['lead']['voice_of_customer'],'Needs 215L')
         self.assertEqual(detail['lead']['category'],'Hot')
         self.assertGreater(detail['lead']['revision'],before)
-        self.assertIn('Loan arranged with a bank.',detail['remark_text'])
-        self.assertLess(detail['remark_text'].index('Discussed'),detail['remark_text'].index('Loan'))
-        self.assertIn('2026-10-15',detail['remark_text'])
+        self.assertEqual(detail['remark_text'], 'Discussed the 215L requirement.')
+        requests = self.client.get('/api/reply-requests').json()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]['body'], 'Loan arranged with a bank.')
+        self.assertEqual(requests[0]['lead_id'], target['id'])
         self.assertNotIn('Older customer',self.client.get(f'/api/leads/{old_lead["id"]}').json()['remark_text'])
         self.request('POST','/api/sync',{'collection_id':saved['id']}); repeated=self.wait_for_collection()
         self.assertEqual(repeated['result']['remarks_added'],0)
         again=self.client.get(f'/api/leads/{target["id"]}').json()
         self.assertEqual(again['lead']['revision'],detail['lead']['revision'])
-        self.assertEqual(again['remark_text'].count('Loan arranged'),1)
+        self.assertNotIn('Loan arranged', again['remark_text'])
+        self.assertEqual(len(self.client.get('/api/reply-requests').json()), 1)
         self.request('POST','/api/sync',{'collection_id':old['id']}); self.wait_for_collection()
         self.assertIn('Older customer',self.client.get(f'/api/leads/{old_lead["id"]}').json()['remark_text'])
         report=self.client.get('/api/report',params={'collection_id':saved['id'],'through':'2026-10-15'})
@@ -328,6 +331,133 @@ class Web(unittest.TestCase):
         self.assertEqual((last['page'],len(last['leads'])),(2,7))
         filtered=self.client.get('/api/leads?q=Buyer%200').json()
         self.assertEqual((filtered['total'],filtered['pages']),(10,1))
+
+    def test_default_year_scopes_leads_and_report_without_collection(self):
+        db = LeadDatabase(self.path)
+        older, _ = db.upsert_source_lead({'lead_id':'older', 'customer_name':'Previous buyer', 'enquiry_date':'2025-05-01'})
+        db.add_activity(older, 'received', 'A new reply for an older enquiry', message_id='<older-reply@test>')
+        db.close()
+        prefs = self.client.get('/api/preferences').json()
+        self.assertEqual(prefs, {'default_enquiry_year':'current', 'resolved_year':2026, 'auto_check_mail':True})
+        self.assertEqual(self.client.get('/api/leads').json()['total'], 1)
+        self.assertEqual(self.client.get('/api/leads?year=2025').json()['leads'][0]['id'], older)
+        self.assertEqual(self.client.get('/api/leads?all_years=true').json()['total'], 2)
+        # Reply alerts include saved older leads, even when the table opens this year.
+        self.assertEqual(self.client.get('/api/reply-requests').json()[0]['lead_id'], older)
+        r = self.request('PUT', '/api/preferences', {'default_enquiry_year':'2025', 'auto_check_mail':False})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()['resolved_year'], 2025)
+        self.assertEqual(self.client.get('/api/leads').json()['leads'][0]['id'], older)
+        report = self.client.get('/api/report')
+        book = load_workbook(BytesIO(report.content))
+        self.assertEqual(book.active.max_row, 2)
+        self.assertEqual(book.active['D2'].value, 'Previous buyer')
+        book.close()
+        db = LeadDatabase(self.path)
+        self.assertEqual(db.get_setting('default_enquiry_year'), '2025')
+        self.assertEqual(db.get_setting('auto_check_mail'), 'false')
+        db.close()
+        self.assertEqual(self.client.get('/api/leads?year=2025&all_years=true').status_code, 400)
+        self.assertEqual(self.client.get('/api/leads?year=2027').status_code, 400)
+        for invalid in ('2027', '1899', 'all', ''):
+            self.assertEqual(self.request('PUT', '/api/preferences', {'default_enquiry_year':invalid}).status_code, 400)
+        self.assertEqual(self.client.put('/api/preferences', json={}).status_code, 403)
+
+    def test_reply_review_dedup_reopen_and_outgoing_cleanup_on_existing_records(self):
+        db = LeadDatabase(self.path)
+        db.update_lead(self.lead_id, {'remark':'Manual update'})
+        db.add_activity(self.lead_id, 'sent', 'Dear Sir,\n\nCustomer needs 215L.\n\nLoan is approved.\n\nThanks & Regards,\nSales Person', message_id='<outgoing@test>')
+        db.add_activity(self.lead_id, 'note', 'Internal call note')
+        db.add_activity(self.lead_id, 'email', 'Legacy unknown-direction mail')
+        db.add_activity(self.lead_id, 'received', 'Please call me', 'buyer@example.test', message_id='<incoming@test>')
+        db.add_activity(self.lead_id, 'received', 'Please call me', 'buyer@example.test', message_id='<incoming@test>')
+        db.close()
+        expected = 'Manual update\n\nCustomer needs 215L.\n\nLoan is approved.'
+        detail = self.detail()
+        self.assertEqual(detail['remark_text'], expected)
+        self.assertEqual(self.client.get('/api/leads').json()['leads'][0]['remark_preview'], expected)
+        self.assertTrue(any(a['body'].startswith('Dear Sir') for a in detail['activities']))
+        self.assertTrue(any(a['body'] == 'Please call me' for a in detail['activities']))
+        requests = self.client.get('/api/reply-requests').json()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(self.request('POST', f'/api/reply-requests/{requests[0]["id"]}/review').status_code, 200)
+        self.assertEqual(self.client.get('/api/reply-requests').json(), [])
+        self.assertEqual(self.request('POST', '/api/reply-requests/999/review').status_code, 404)
+        db = LeadDatabase(self.path)
+        db.request_reply_review(requests[0]['activity_id'])
+        self.assertEqual(len(db.reply_requests()), 1)
+        db.close()
+        self.assertEqual(self.client.get('/api/reply-requests').json()[0]['id'], requests[0]['id'])
+        book = load_workbook(BytesIO(self.client.get('/api/report').content))
+        self.assertEqual(book.active['J2'].value, expected)
+        book.close()
+
+    def test_automatic_check_collects_new_mail_and_stops_with_server(self):
+        path = self.prepare_range_mailbox()
+        # Keep the first manual collection separate from the automatic scanner.
+        self.request('PUT', '/api/preferences', {'auto_check_mail':False})
+        self.request('POST', '/api/sync', {'year':2026}); self.wait_for_collection()
+        self.request('POST', '/api/sync', {'year':2025}); self.wait_for_collection()
+        other = create_app(self.path, mail_check_seconds=.04)
+        with TestClient(other) as client:
+            time.sleep(.1)
+            self.assertFalse(client.get('/api/sync').json()['finished_at'])
+            box = mailbox.mbox(path)
+            box.add(reply('<auto-in@test>', '<2601@example.test>', sender='buyer@example.test', body='Please update the quotation.'))
+            box.add(reply('<old-auto-in@test>', '<2501@example.test>', sender='buyer@example.test', body='Earlier enquiry needs update.'))
+            box.close(); os.utime(path, (1, 1))
+            self.request('PUT', '/api/preferences', {'auto_check_mail':True})
+            for _ in range(200):
+                requests = client.get('/api/reply-requests').json()
+                if len(requests) == 2: break
+                time.sleep(.02)
+            self.assertEqual(len(requests), 2)
+            job = client.get('/api/sync').json()
+            self.assertTrue(job['automatic'])
+            self.assertEqual({r['body'] for r in requests}, {'Please update the quotation.', 'Earlier enquiry needs update.'})
+            self.request('PUT', '/api/preferences', {'auto_check_mail':False})
+        # Lifespan joins the checker and worker before returning.
+        self.assertFalse(other.state.mail_checker.is_alive())
+
+    def test_changed_incoming_tail_reopens_exactly_one_request(self):
+        path = self.prepare_range_mailbox()
+        self.request('POST', '/api/sync', {'year':2026}); self.wait_for_collection()
+        item = reply('<mutable-in@test>', '<2601@example.test>', sender='buyer@example.test', body='Need a quote')
+        box = mailbox.mbox(path); key = box.add(item); box.close(); os.utime(path, (1,1))
+        self.request('POST', '/api/sync', {'year':2026}); self.wait_for_collection()
+        request = self.client.get('/api/reply-requests').json()[0]
+        self.request('POST', f'/api/reply-requests/{request["id"]}/review')
+        self.request('POST', '/api/sync', {'year':2026}); self.wait_for_collection()
+        self.assertEqual(self.client.get('/api/reply-requests').json(), [])
+        item.set_content('Need a quote with financing options')
+        box = mailbox.mbox(path); box[key] = item; box.flush(); box.close(); os.utime(path, (1,1))
+        self.request('POST', '/api/sync', {'year':2026}); self.wait_for_collection()
+        reopened = self.client.get('/api/reply-requests').json()
+        self.assertEqual(len(reopened), 1)
+        self.assertEqual(reopened[0]['id'], request['id'])
+        self.assertEqual(reopened[0]['body'], 'Need a quote with financing options')
+        detail = self.client.get(f'/api/leads/{request["lead_id"]}').json()
+        self.assertEqual(detail['remark_text'], '')
+
+    def test_automatic_and_manual_collection_share_worker_lock(self):
+        import threading
+        from thunderbird_sync import SyncResult
+        self.prepare_range_mailbox()
+        entered, release = threading.Event(), threading.Event()
+        def slow_sync(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return SyncResult()
+        with patch('web_app.sync_mailboxes', side_effect=slow_sync):
+            other = create_app(self.path, mail_check_seconds=.03)
+            with TestClient(other) as client:
+                try:
+                    self.assertTrue(entered.wait(1))
+                    headers = {'X-CRM-Token':client.get('/api/session').json()['token']}
+                    self.assertEqual(client.post('/api/sync', headers=headers, json={}).status_code, 409)
+                finally:
+                    release.set()
+
 
 
 
