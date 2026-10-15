@@ -13,7 +13,7 @@ import time
 
 from bs4 import BeautifulSoup
 from crm_database import as_iso_date
-from html_parser import parse_html, extract_lead_id
+from html_parser import parse_html, parse_plain_text, extract_lead_id
 from mailbox_reader import decode, get_body
 from models import EmailMessage
 from thread_parser import clean_reply
@@ -28,6 +28,7 @@ class SyncResult:
     unparsed: int = 0
     pending: int = 0
     errors: list[str] = field(default_factory=list)
+    issues: list[dict[str, str]] = field(default_factory=list)
 
 
 def _to_email_message(message):
@@ -78,10 +79,12 @@ def _message_ids(mail):
 def _lead_from_mail(mail):
     extracted = parse_html(mail.html, mail.subject)
     if not extracted.get('Date') or not extracted.get('Name'):
+        extracted = {**extracted, **parse_plain_text(mail.text, mail.subject)}
+    if not extracted.get('Date') or not extracted.get('Name'):
         return {}
     mapping = {'Lead ID':'lead_id', 'Date':'enquiry_date', 'Name':'customer_name', 'Contact No.':'contact_no',
         'Email Id':'email_id', 'Alt No.':'alt_no', 'Model No.':'model', 'Category':'category',
-        'City':'city', 'Voice of Customer':'voice_of_customer'}
+        'City':'city', 'Voice of Customer':'voice_of_customer', 'Quantity':'quantity', 'Dealer':'dealer'}
     values = {mapping[k]: v for k, v in extracted.items() if k in mapping}
     values['enquiry_date'] = as_iso_date(values['enquiry_date'])
     values['message_id'] = mail.message_id
@@ -99,7 +102,7 @@ def _reply_text(mail):
 
 def _occurred_at(value):
     try:
-        return parsedate_to_datetime(value).astimezone().strftime('%Y-%m-%d %H:%M:%S')
+        return parsedate_to_datetime(value).astimezone().isoformat(sep=' ', timespec='seconds')
     except (ValueError, TypeError, OverflowError):
         return ''
 
@@ -142,9 +145,14 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
         raise FileNotFoundError(f'Mailbox not found: {path}')
     # Changing source filters must allow previously ignored enquiries to be read.
     key = 'mailbox_v2:' + hashlib.sha256((str(path) + '|' + ','.join(sorted(senders))).encode()).hexdigest()
-    checkpoint = json.loads(database.get_setting(key, '{}'))
+    try:
+        checkpoint = json.loads(database.get_setting(key, '{}'))
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+        offset = int(checkpoint.get('offset', 0))
+    except (ValueError, TypeError):
+        checkpoint, offset = {}, 0
     before = path.stat()
-    offset = int(checkpoint.get('offset', 0))
     if force or offset < 0 or offset > before.st_size or checkpoint.get('prefix') != _prefix_hash(path, offset):
         offset = 0
     next_offset = offset
@@ -159,14 +167,21 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
             continue
         with database.transaction():
             lead = {}
+            parse_error = 'Expected enquiry fields Date and Name were not found.'
             if sender in senders and not _message_ids(mail):
                 try:
                     lead = _lead_from_mail(mail)
-                except ValueError:
-                    pass
+                except ValueError as error:
+                    parse_error = str(error)
             if lead:
                 lead['message_id'] = message_id
-                lead_id, created = database.upsert_source_lead(lead)
+                try:
+                    lead_id, created = database.upsert_source_lead(lead)
+                except ValueError as error:
+                    result.unparsed += 1
+                    if len(result.issues) < 100:
+                        result.issues.append({'folder': path.name, 'subject': mail.subject, 'reason': str(error)})
+                    continue
                 result.new_leads += int(created)
                 result.existing_leads += int(not created)
                 database.connection.execute("""INSERT INTO email_messages VALUES (?, ?, 'source', '', ?)
@@ -176,6 +191,8 @@ def _ingest(database, path, senders, my_email, result, force=False, settle_secon
             references = _message_ids(mail)
             if sender in senders and not references:
                 result.unparsed += 1
+                if len(result.issues) < 100:
+                    result.issues.append({'folder': path.name, 'subject': mail.subject, 'reason': parse_error})
                 continue
             call_id = extract_lead_id(mail.subject) if re.search(r'inquiry|enquiry|call\s*id', mail.subject, re.I) else ''
             if not references and not call_id:

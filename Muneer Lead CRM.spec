@@ -4,7 +4,7 @@ a = Analysis(
     ['lead_crm_app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('templates/lead-master.xlsx', 'templates')],
     hiddenimports=[],
     hookspath=['packaging'],
     hooksconfig={},

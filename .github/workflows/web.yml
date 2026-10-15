@@ -1,0 +1,61 @@
+name: Build Local Web App
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-web.txt
+            requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip check
+      - run: python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+      - name: Verify Windows setup and startup
+        shell: pwsh
+        run: |
+          ./setup.ps1
+          $env:LEAD_CRM_DATA_DIR = Join-Path $env:RUNNER_TEMP 'lead-web-ci'
+          $process = Start-Process -FilePath '.web-venv/Scripts/python.exe' -ArgumentList 'run_web.py --no-browser --port 8123' -PassThru
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 50; $attempt++) {
+              if ($process.HasExited) { throw 'The local server exited during startup.' }
+              try {
+                $result = Invoke-RestMethod 'http://127.0.0.1:8123/api/health'
+                if ($result.ok) { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 200 }
+            }
+            if (-not $ready) { throw 'The local server did not become ready.' }
+            $page = Invoke-WebRequest 'http://127.0.0.1:8123/'
+            if ($page.Content -notmatch 'Muneer') { throw 'The interface did not load.' }
+          }
+          finally { if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force } }
+      - run: python build_web_release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Muneer-Lead-Workspace
+          path: dist/Muneer-Lead-Workspace.zip
+          if-no-files-found: error
+          retention-days: 30

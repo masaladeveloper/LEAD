@@ -15,6 +15,10 @@ CRM_COLUMNS = ('remark', 'responded', 'relevance', 'deal_temperature', 'outcome'
 SOURCE_COLUMNS = ('dealer', 'lead_id', 'enquiry_date', 'customer_name', 'contact_no', 'email_id', 'alt_no', 'model', 'quantity', 'voice_of_customer', 'category', 'city')
 
 
+class StaleLeadError(ValueError):
+    """A lead was changed after a browser opened it."""
+
+
 def normalise_phone(value: Any) -> str:
     text = str(value or '').strip()
     if text.endswith('.0'):
@@ -34,7 +38,11 @@ def as_iso_date(value: Any) -> str:
     if isinstance(value, date):
         return value.isoformat()
     text = str(value).strip()
-    for pattern in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y'):
+    try:
+        return datetime.fromisoformat(text).date().isoformat()
+    except ValueError:
+        pass
+    for pattern in ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y', '%d-%b-%Y', '%d %b %Y', '%d/%m/%Y %H:%M'):
         try:
             return datetime.strptime(text, pattern).date().isoformat()
         except ValueError:
@@ -125,7 +133,22 @@ class LeadDatabase:
                 kind TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '',
                 content_hash TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS lead_history (
+                id INTEGER PRIMARY KEY, lead_id INTEGER NOT NULL REFERENCES leads(id),
+                snapshot TEXT NOT NULL, overrides TEXT NOT NULL,
+                changed_fields TEXT NOT NULL, saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_lead ON lead_history(lead_id, id);
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY, lead_id INTEGER NOT NULL REFERENCES leads(id),
+                due_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+                completed_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_reminder_due ON reminders(completed_at, due_at);
         ''')
+        columns = {row[1] for row in self.connection.execute('PRAGMA table_info(leads)')}
+        if 'revision' not in columns:
+            self.connection.execute('ALTER TABLE leads ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
         self.connection.commit()
 
     def backup(self) -> Path:
@@ -140,7 +163,7 @@ class LeadDatabase:
     def _quantity(value):
         try:
             number = float(value)
-            if not number.is_integer() or number < 1:
+            if not number.is_integer() or number < 1 or number > 9223372036854775807:
                 raise ValueError
             return int(number)
         except (TypeError, ValueError, OverflowError):
@@ -198,7 +221,7 @@ class LeadDatabase:
     def _write(self, lead_id, values):
         if values:
             assignments = ', '.join(f'{key} = ?' for key in values)
-            self.connection.execute(f'UPDATE leads SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [*values.values(), lead_id])
+            self.connection.execute(f'UPDATE leads SET {assignments}, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [*values.values(), lead_id])
 
     def update_lead(self, lead_id: int, values: dict[str, Any], *, protect_source=True):
         prepared = self._prepare(values)
@@ -239,20 +262,24 @@ class LeadDatabase:
         row = self.connection.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone()
         return dict(row) if row else None
 
-    def search(self, term='', limit=10000, status='All leads'):
+    def search(self, term='', limit=10000, status='All leads', offset=0):
         clauses, params = [], []
         if term.strip():
-            clauses.append('(' + ' OR '.join(f'{k} LIKE ?' for k in ('lead_id', 'customer_name', 'contact_no', 'email_id', 'model', 'city')) + ')')
-            params.extend([f'%{term.strip()}%'] * 6)
+            fields = (*SOURCE_COLUMNS, *CRM_COLUMNS)
+            clauses.append('(' + ' OR '.join(f'CAST({k} AS TEXT) LIKE ?' for k in fields) +
+                           ' OR EXISTS (SELECT 1 FROM activities WHERE activities.lead_id = leads.id AND (body LIKE ? OR sender LIKE ?)))')
+            params.extend([f'%{term.strip()}%'] * (len(fields) + 2))
         if status == 'Follow-ups due':
             clauses.append("follow_up_date <> '' AND follow_up_date <= date('now', 'localtime') AND status NOT IN ('Won', 'Lost', 'Closed')")
         elif status == 'Open leads':
             clauses.append("status NOT IN ('Won', 'Lost', 'Closed')")
+        elif status == 'Upcoming follow-ups':
+            clauses.append("follow_up_date > date('now', 'localtime') AND status NOT IN ('Won', 'Lost', 'Closed')")
         elif status in STATUSES:
             clauses.append('status = ?')
             params.append(status)
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
-        rows = self.connection.execute('SELECT * FROM leads' + where + ' ORDER BY enquiry_date DESC, id DESC LIMIT ?', [*params, limit]).fetchall()
+        rows = self.connection.execute('SELECT * FROM leads' + where + ' ORDER BY enquiry_date DESC, id DESC LIMIT ? OFFSET ?', [*params, limit, offset]).fetchall()
         return [dict(row) for row in rows]
 
     def all_leads(self, from_date='', to_date=''):
@@ -329,3 +356,100 @@ class LeadDatabase:
                 added += int(created)
                 updated += int(not created)
         return added, updated
+
+    def _check_revision(self, lead_id, revision):
+        lead = self.get_lead(lead_id)
+        if not lead:
+            raise ValueError('Lead no longer exists.')
+        if lead['revision'] != revision:
+            raise StaleLeadError('This lead changed while you were editing. Reload it and try again.')
+        return lead
+
+    def _overrides(self, lead_id):
+        return [r[0] for r in self.connection.execute('SELECT field FROM field_overrides WHERE lead_id = ?', (lead_id,))]
+
+    def _remember(self, previous, changed_fields, overrides):
+        snapshot = {key: previous.get(key) for key in (*SOURCE_COLUMNS, *CRM_COLUMNS)}
+        self.connection.execute('INSERT INTO lead_history (lead_id,snapshot,overrides,changed_fields) VALUES (?,?,?,?)',
+                                (previous['id'], json.dumps(snapshot), json.dumps(overrides), json.dumps(changed_fields)))
+        self.connection.execute('DELETE FROM lead_history WHERE lead_id = ? AND id NOT IN '
+                                '(SELECT id FROM lead_history WHERE lead_id = ? ORDER BY id DESC LIMIT 5)',
+                                (previous['id'], previous['id']))
+
+    def edit_with_history(self, lead_id, values, revision):
+        with self.transaction():
+            previous = self._check_revision(lead_id, revision)
+            overrides = self._overrides(lead_id)
+            self.update_lead(lead_id, values)
+            current = self.get_lead(lead_id)
+            changed = [key for key in (*SOURCE_COLUMNS, *CRM_COLUMNS) if previous.get(key) != current.get(key)]
+            if changed:
+                self._remember(previous, changed, overrides)
+            return current
+
+    def history(self, lead_id):
+        return [{**dict(row), 'snapshot': json.loads(row['snapshot']), 'changed_fields': json.loads(row['changed_fields'])}
+                for row in self.connection.execute('SELECT id,snapshot,changed_fields,saved_at FROM lead_history WHERE lead_id = ? ORDER BY id DESC', (lead_id,))]
+
+    def restore_history(self, lead_id, history_id, revision):
+        with self.transaction():
+            previous = self._check_revision(lead_id, revision)
+            overrides = self._overrides(lead_id)
+            row = self.connection.execute('SELECT * FROM lead_history WHERE id = ? AND lead_id = ?', (history_id, lead_id)).fetchone()
+            if not row:
+                raise ValueError('This saved change is no longer available.')
+            self.update_lead(lead_id, json.loads(row['snapshot']), protect_source=False)
+            self.connection.execute('DELETE FROM field_overrides WHERE lead_id = ?', (lead_id,))
+            for field in json.loads(row['overrides']):
+                self.connection.execute('INSERT INTO field_overrides VALUES (?,?)', (lead_id, field))
+            current = self.get_lead(lead_id)
+            changed = [key for key in (*SOURCE_COLUMNS, *CRM_COLUMNS) if previous.get(key) != current.get(key)]
+            if changed:
+                self._remember(previous, changed, overrides)
+                self.add_activity(lead_id, 'restore', 'Restored a saved lead version')
+            return current
+
+    def clear_history(self, lead_id, revision):
+        with self.transaction():
+            self._check_revision(lead_id, revision)
+            self.connection.execute('DELETE FROM lead_history WHERE lead_id = ?', (lead_id,))
+            self.connection.execute('UPDATE leads SET revision = revision + 1 WHERE id = ?', (lead_id,))
+            return self.get_lead(lead_id)
+
+    def reminders(self, lead_id=None):
+        clause = ' WHERE reminders.lead_id = ?' if lead_id is not None else ''
+        params = (lead_id,) if lead_id is not None else ()
+        return [dict(row) for row in self.connection.execute('''SELECT reminders.*, leads.customer_name, leads.contact_no,
+            leads.status, leads.lead_id AS call_id FROM reminders JOIN leads ON leads.id = reminders.lead_id''' + clause +
+            ' ORDER BY completed_at, due_at, reminders.id', params)]
+
+    def add_reminder(self, lead_id, due_at, note):
+        try:
+            due = datetime.fromisoformat(due_at)
+            if due.tzinfo is not None:
+                due = due.astimezone().replace(tzinfo=None)
+            due_at = due.isoformat(timespec='minutes')
+        except (ValueError, TypeError):
+            raise ValueError('Choose a valid reminder date and time.') from None
+        with self.transaction():
+            if not self.get_lead(lead_id):
+                raise ValueError('Lead no longer exists.')
+            cursor = self.connection.execute('INSERT INTO reminders (lead_id,due_at,note) VALUES (?,?,?)', (lead_id, due_at, note.strip()))
+            lead = self.get_lead(lead_id)
+            if not lead['follow_up_date'] or due_at[:10] < lead['follow_up_date']:
+                self.update_lead(lead_id, {'follow_up_date': due_at[:10]}, protect_source=False)
+            self.add_activity(lead_id, 'reminder', f'Follow-up scheduled for {due_at}: {note.strip()}')
+            return cursor.lastrowid
+
+    def complete_reminder(self, reminder_id):
+        with self.transaction():
+            row = self.connection.execute('SELECT * FROM reminders WHERE id = ?', (reminder_id,)).fetchone()
+            if not row:
+                raise ValueError('Reminder no longer exists.')
+            self.connection.execute("UPDATE reminders SET completed_at = CURRENT_TIMESTAMP WHERE id = ?", (reminder_id,))
+            if not row['completed_at']:
+                self.add_activity(row['lead_id'], 'reminder', f'Follow-up completed: {row["note"]}')
+                lead = self.get_lead(row['lead_id'])
+                if lead['follow_up_date'] == row['due_at'][:10]:
+                    next_due = self.connection.execute("SELECT MIN(due_at) FROM reminders WHERE lead_id = ? AND completed_at = ''", (row['lead_id'],)).fetchone()[0]
+                    self.update_lead(row['lead_id'], {'follow_up_date': next_due[:10] if next_due else ''}, protect_source=False)

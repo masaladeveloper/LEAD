@@ -19,7 +19,22 @@ FIELD_MAP = {
     "Category": "Category",
     "City": "City",
     "Voice of Customer": "Voice of Customer",
+    "Customer Name": "Name",
+    "Phone": "Contact No.",
+    "Mobile No": "Contact No.",
+    "Email": "Email Id",
+    "Email ID": "Email Id",
+    "Quantity": "Quantity",
+    "Dealer": "Dealer",
 }
+
+
+def field_name(value):
+    """Accept punctuation/case variations while keeping the known enquiry schema."""
+    return re.sub(r'[^a-z0-9]', '', value.casefold())
+
+
+NORMALISED_FIELDS = {field_name(key): value for key, value in FIELD_MAP.items()}
 
 
 def clean(text: str) -> str:
@@ -65,7 +80,7 @@ def parse_html(html, subject=""):
 
     for row in rows:
 
-        cols = row.find_all(["td", "th"])
+        cols = row.find_all(["td", "th"], recursive=False)
 
         if len(cols) < 2:
             continue
@@ -75,13 +90,24 @@ def parse_html(html, subject=""):
 
         key = key.rstrip(":").strip()
 
-        if key in FIELD_MAP:
+        if field_name(key) in NORMALISED_FIELDS:
 
-            field = FIELD_MAP[key]
+            field = NORMALISED_FIELDS[field_name(key)]
 
             if field == "Category":
                 value = value.upper().replace(" LEAD", "").title()
 
             lead[field] = value
 
+    return lead
+
+
+def parse_plain_text(text, subject=''):
+    """Support label: value messages from the same supplier when HTML is absent."""
+    lead = {'Lead ID': extract_lead_id(subject)}
+    for line in text.splitlines():
+        key, separator, value = line.partition(':')
+        field = NORMALISED_FIELDS.get(field_name(key))
+        if separator and field and clean(value):
+            lead[field] = clean(value)
     return lead

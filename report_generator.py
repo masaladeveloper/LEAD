@@ -6,7 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+from copy import copy
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
@@ -57,38 +58,51 @@ def generate_weekly_report(leads: Iterable[dict[str, Any]], destination: str | P
     """Write the established 17-column IndiaMART lead-master format."""
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    workbook = Workbook()
+    template = Path(__file__).resolve().parent / 'templates' / 'lead-master.xlsx'
+    workbook = load_workbook(template) if template.is_file() else Workbook()
     sheet = workbook.active
-    sheet.title = "Lead Master"
+    has_template = template.is_file()
+    row_styles = [copy(sheet.cell(2, column)._style) for column in range(1, 18)]
+    table_style = copy(next(iter(sheet.tables.values())).tableStyleInfo) if sheet.tables else None
+    for name in list(sheet.tables):
+        del sheet.tables[name]
+    if not has_template:
+        sheet.title = "Lead Master"
 
     header_fill = PatternFill("solid", fgColor="FBD4B4")
     header_font = Font(bold=True)
     top_alignment = Alignment(vertical="top", wrap_text=True)
     for column, (heading, _) in enumerate(REPORT_COLUMNS, 1):
         cell = sheet.cell(1, column, heading)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(vertical="center", wrap_text=True)
-        sheet.column_dimensions[cell.column_letter].width = WIDTHS[column - 1]
-    sheet.row_dimensions[1].height = 33
+        if not has_template:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            sheet.column_dimensions[cell.column_letter].width = WIDTHS[column - 1]
+    if not has_template:
+        sheet.row_dimensions[1].height = 33
+    row_height = sheet.row_dimensions[2].height or 48
 
     row_number = 2
     for lead in leads:
         for column, (_, field) in enumerate(REPORT_COLUMNS, 1):
             cell = sheet.cell(row_number, column, _report_value(lead, field))
+            if has_template:
+                cell._style = copy(row_styles[column - 1])
             if isinstance(cell.value, str):
                 cell.data_type = "s"
-            cell.alignment = top_alignment
+            if not has_template:
+                cell.alignment = top_alignment
             if field == "enquiry_date" and cell.value:
-                cell.number_format = "d/m/yyyy"
-        sheet.row_dimensions[row_number].height = 48
+                cell.number_format = 'dd"-"mm"-"yyyy' if has_template else "d/m/yyyy"
+        sheet.row_dimensions[row_number].height = row_height
         row_number += 1
 
     # Excel tables require at least one data row. A blank placeholder keeps an
     # empty weekly report valid and visibly ready for data.
     last_row = max(2, row_number - 1)
-    table = Table(displayName="LeadMaster", ref=f"A1:Q{last_row}")
-    table.tableStyleInfo = TableStyleInfo(
+    table = Table(displayName="Table1" if has_template else "LeadMaster", ref=f"A1:Q{last_row}")
+    table.tableStyleInfo = table_style or TableStyleInfo(
         name="TableStyleMedium2", showFirstColumn=False, showLastColumn=False,
         showRowStripes=True, showColumnStripes=False,
     )

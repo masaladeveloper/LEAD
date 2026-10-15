@@ -12,3 +12,7 @@ output/
 Muneer Lead CRM/
 build/
 dist/
+node_modules/
+frontend/dist/
+.web-venv/
+*.tsbuildinfo
